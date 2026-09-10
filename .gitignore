@@ -1,0 +1,40 @@
+# ============================================================
+# Git 忽略清单
+# 原则：凡是「密钥 / 本地环境 / 大文件 / 自动生成」的东西都不提交
+# ============================================================
+
+# ---- 密钥与本地配置（最重要：绝对不能提交到 GitHub）----
+.env
+.env.local
+*.key
+
+# ---- Python 虚拟环境 ----
+.venv/
+venv/
+env/
+
+# ---- Python 缓存 ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---- 测试用 PDF 与样本文件（体积大，且涉及版权，不进仓库）----
+*.pdf
+samples/
+sample_pdfs/
+
+# ---- 图片生成缓存（阶段 3 提取出的图片会临时落盘）----
+extracted_images/
+tmp/
+temp/
+
+# ---- 编辑器与系统文件 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Streamlit 本地状态 ----
+.streamlit/secrets.toml
