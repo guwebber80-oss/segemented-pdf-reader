@@ -1,24 +1,31 @@
 r"""
 科研文献 PDF 智能阅读器 —— 主程序（界面层）
 ================================================
-阶段 1：PDF 文本提取与卡片式分块
+阶段 2：卡片中英文一键切换
 
 文件分工：
-    app.py         ← 本文件，只管界面：上传、设置、渲染卡片、诊断面板
+    app.py         ← 本文件，只管界面：上传、设置、渲染卡片、诊断面板、语言切换
     pdf_parser.py  ← 解析逻辑：文本块提取、分栏判断、阅读顺序、段落合并、标题识别
-
-为什么拆成两个文件：解析逻辑不依赖 Streamlit，可以脱离网页单独测试和调试；
-以后要调算法时不用碰界面代码。（阶段 5 会把它搬进 utils/ 目录。）
+    translator.py  ← 翻译逻辑：DeepL / OpenAI / Google 三种后端，带超时与重试
 
 运行命令（本项目约定：不激活虚拟环境，直接用 venv 的 python）：
     .\.venv\Scripts\python.exe -m streamlit run app.py
 
-测试样本要求：1 篇单栏 + 1 篇双栏英文文献，必须有文字层（非扫描版）。
+翻译需要 .env 里有 API Key（复制 .env.example 为 .env 后填写），见 README「阶段 2 说明」。
 """
 
 import streamlit as st
 
 from pdf_parser import count_words, escape_markdown, parse_pdf
+from translator import (
+    BACKEND_LABELS,
+    TARGET_LABELS,
+    TranslationError,
+    backend_availability,
+    load_config,
+    probe_backend,
+    translate,
+)
 
 # ============================================================
 # 第 0 部分：页面配置（必须是第一个 Streamlit 调用）
@@ -29,13 +36,87 @@ st.set_page_config(
     layout="wide",
 )
 
+# ============================================================
+# 第 1 部分：会话状态初始化
+# ============================================================
+# Streamlit 的机制是「任何交互都会把整个脚本从头重跑一遍」，
+# 所以【跨交互要保留的东西】必须放进 st.session_state，否则每次点击都会丢。
+#   translations     翻译缓存：{(后端, 目标语言, 原文): 译文}，命中就不再调 API（省钱、省时间）
+#   translate_stats  计数：用来验证「重复点击不会重复请求」
+if "translations" not in st.session_state:
+    st.session_state["translations"] = {}
+if "translate_stats" not in st.session_state:
+    st.session_state["translate_stats"] = {"requests": 0, "hits": 0, "chars": 0, "errors": 0}
+
+# 语言切换控件的两个选项（英文原文 / 中文译文）
+LANG_EN, LANG_ZH = "EN", "中文"
+
+
+def translate_cached(text: str, backend: str, target: str):
+    """
+    带缓存的翻译。返回 (译文, 错误消息)，两者必有一个是 None。
+
+    缓存键是「后端 + 目标语言 + 原文」，所以：
+      · 同一张卡片来回点 中/EN，第二次起直接读缓存，不会再花额度
+      · 换后端或换目标语言会重新翻译（因为缓存键变了）
+    """
+    if not backend:
+        return None, "没有可用的翻译后端：请先在 .env 里配置 API Key。"
+
+    cache = st.session_state["translations"]
+    stats = st.session_state["translate_stats"]
+    cache_key = (backend, target, text)
+
+    if cache_key in cache:
+        stats["hits"] += 1
+        return cache[cache_key], None
+
+    try:
+        with st.spinner("正在翻译…"):
+            result = translate(text, target=target, backend=backend)
+    except TranslationError as exc:
+        # TranslationError 的文本已经是给用户看的中文提示
+        stats["errors"] += 1
+        print(f"[translate][失败] {backend} {target} {len(text)}字符: {exc}", flush=True)
+        return None, str(exc)
+    except Exception as exc:
+        stats["errors"] += 1
+        print(f"[translate][异常] {type(exc).__name__}: {exc}", flush=True)
+        return None, f"未预期的错误 {type(exc).__name__}: {exc}"
+
+    cache[cache_key] = result
+    stats["requests"] += 1
+    stats["chars"] += len(text)
+    # 同时打到终端，方便对照界面上的计数一起验证「有没有重复请求」
+    print(f"[translate][成功] {backend} {target} {len(text)}字符 → {len(result)}字符", flush=True)
+    return result, None
+
+
+def render_language_toggle(key: str):
+    """
+    卡片里的中/EN 切换控件，返回当前选中的语言。
+
+    注意：这里用「先往 session_state 里塞默认值、控件不带 default」的写法，
+    而不是给控件传 default=——因为两者同时用会触发 Streamlit 的冲突警告。
+    """
+    if key not in st.session_state:
+        st.session_state[key] = LANG_EN
+    return st.segmented_control(
+        "显示语言",
+        [LANG_EN, LANG_ZH],
+        key=key,
+        label_visibility="collapsed",
+    )
+
+
 st.title("📚 科研文献 PDF 智能阅读器")
-st.caption("阶段 1：把 PDF 变成按阅读顺序排列的卡片流（默认展开前 3 张正文卡片）")
+st.caption("阶段 2：卡片式阅读 + 中英文一键切换（译文按需请求，带缓存）")
 
 # ============================================================
-# 第 1 部分：侧边栏 —— 解析设置
+# 第 2 部分：侧边栏
 # ============================================================
 with st.sidebar:
+    # ---- 2.1 解析设置 ----
     st.header("⚙️ 解析设置")
     merge_on = st.toggle(
         "段落自动合并", value=True,
@@ -51,29 +132,83 @@ with st.sidebar:
     )
     expand_n = st.slider("默认展开卡片数", min_value=0, max_value=10, value=3)
 
+    st.divider()
+
+    # ---- 2.2 翻译设置 ----
+    st.header("🌐 翻译设置")
+    config = load_config()
+    availability = backend_availability(config)
+    usable_backends = [name for name, ready in availability.items() if ready]
+
+    if usable_backends:
+        default_backend = config["backend"] if config["backend"] in usable_backends else usable_backends[0]
+        backend = st.selectbox(
+            "翻译后端", usable_backends,
+            index=usable_backends.index(default_backend),
+            format_func=lambda name: BACKEND_LABELS.get(name, name),
+        )
+        target = st.selectbox(
+            "目标语言", list(TARGET_LABELS),
+            format_func=lambda code: TARGET_LABELS[code],
+        )
+
+        col_test, col_reload = st.columns(2)
+        if col_test.button("测试连接"):
+            try:
+                sample = probe_backend(backend, target)
+                st.success(f"连接正常 ✅ 示例：{sample}")
+            except TranslationError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"未预期的错误 {type(exc).__name__}: {exc}")
+        if col_reload.button("重读 .env", help="改完 .env 后点这里，不用重启服务"):
+            load_config(force_reload=True)
+            st.rerun()
+    else:
+        backend, target = None, "zh"
+        st.warning(
+            "没有检测到任何翻译 API Key，中英切换不可用。\n\n"
+            "请把项目根目录的 `.env.example` 复制成 `.env`，填入 `DEEPL_API_KEY`，"
+            "然后点下面的「重读 .env」。"
+        )
+        if st.button("重读 .env"):
+            load_config(force_reload=True)
+            st.rerun()
+
+    if st.button("清空翻译缓存"):
+        st.session_state["translations"] = {}
+        st.session_state["translate_stats"] = {"requests": 0, "hits": 0, "chars": 0, "errors": 0}
+        st.rerun()
+
+    st.caption("改完 .env 需要点「重读 .env」或重启服务才会生效。")
+
+    # 计数占位符：侧边栏在页面最前面渲染，而翻译发生在后面的卡片里，
+    # 所以先留一个空位，等所有卡片渲染完再把真实计数填进来（否则显示的永远是上一轮的数字）。
+    stats_slot = st.empty()
+
 # ============================================================
-# 第 2 部分：上传
+# 第 3 部分：上传
 # ============================================================
 uploaded_file = st.file_uploader(
     label="请上传一篇 PDF 文献",
     type=["pdf"],
     accept_multiple_files=False,
-    help="阶段 1 支持有文字层的单栏 / 双栏 PDF。扫描版（纯图片）本阶段不支持。",
+    help="支持有文字层的单栏 / 双栏 PDF。扫描版（纯图片）本阶段不支持。",
 )
 
 if uploaded_file is None:
-    st.info("👆 请在上方选择一篇 PDF。建议先用一篇**双栏**英文文献测试阅读顺序。")
+    st.info(
+        "👆 请在上方选择一篇 PDF。\n\n"
+        "读起来之后，展开任意一张卡片，用里面的 **EN / 中文** 按钮切换语言。"
+    )
     st.stop()      # 没有文件就停下，避免下面到处写 None 判断
 
 pdf_bytes = uploaded_file.getvalue()
 
 # ============================================================
-# 第 3 部分：解析（带缓存）
+# 第 4 部分：解析（带缓存）
 # ============================================================
-# 为什么要缓存：Streamlit 的机制是「任何交互都会把整个脚本从头重跑一遍」——
-# 你每点一次展开/收起、每动一次滑块，脚本都会重新执行。
-# 不缓存的话，每次点击都要重新解析一遍 PDF，大文件会明显卡顿。
-# 这里用 session_state 按「文件 + 设置」的指纹来判断要不要重新解析。
+# 按「文件 + 设置」的指纹判断要不要重新解析，避免每次点击都重算一遍 PDF。
 file_key = f"{uploaded_file.name}|{uploaded_file.size}|{merge_on}|{dehyphenate_on}|{max_words}"
 
 if st.session_state.get("parse_key") != file_key:
@@ -83,7 +218,7 @@ if st.session_state.get("parse_key") != file_key:
             st.session_state["parse_key"] = file_key
             st.session_state["parse_error"] = None
         except Exception as exc:
-            # 解析失败不能让页面白屏或抛栈，要把错误原样显示出来方便排查
+            # 解析失败不能让页面白屏，要把错误原样显示出来方便排查
             st.session_state["parse_result"] = None
             st.session_state["parse_key"] = None
             st.session_state["parse_error"] = f"{type(exc).__name__}: {exc}"
@@ -98,7 +233,7 @@ blocks = result["blocks"]
 pages = result["pages"]
 
 # ============================================================
-# 第 4 部分：解析概览
+# 第 5 部分：解析概览
 # ============================================================
 st.subheader("📊 解析概览")
 
@@ -121,24 +256,45 @@ st.caption(
 if result["total_chars"] < 200:
     st.warning(
         f"⚠️ 这个 PDF 几乎提取不到文字（全文仅 {result['total_chars']} 个字符），"
-        "很可能是**扫描版 / 图片版**。阶段 1 不做 OCR，请换一篇有文字层的 PDF 测试。"
+        "很可能是**扫描版 / 图片版**。本阶段不做 OCR，请换一篇有文字层的 PDF 测试。"
     )
 
 st.divider()
 
 # ============================================================
-# 第 5 部分：卡片流
+# 第 6 部分：卡片流（含中英切换）
 # ============================================================
 st.subheader("📖 阅读卡片")
+st.caption(
+    "展开卡片后，用里面的 **EN / 中文** 按钮切换语言；"
+    "译文只在第一次点击时请求，来回切换不会重复扣额度。"
+)
 
 _COLUMN_NAME = {-1: "通栏", 0: "左栏", 1: "右栏"}
 expanded_used = 0        # 已展开的正文卡片数，用来实现「默认只展开前 N 张」
+translated_cards = 0     # 本次渲染里显示为中文的卡片数（统计用）
 
 for b in blocks:
     if b.kind == "heading":
-        # 标题单独成卡片：用 Markdown 标题级别对应它的层级
+        # 标题卡片：标题文字在左，语言切换在右
         level = min(max(b.level, 1), 4)
-        st.markdown(f"{'#' * (level + 1)} {escape_markdown(b.text)}")
+        col_text, col_lang = st.columns([6, 1])
+
+        with col_lang:
+            heading_lang = render_language_toggle(f"lang_{b.order}")
+
+        with col_text:
+            if heading_lang == LANG_ZH:
+                zh, error = translate_cached(b.text, backend, target)
+                if error:
+                    st.error(f"翻译失败：{error}")
+                    st.markdown(f"{'#' * (level + 1)} {escape_markdown(b.text)}")
+                else:
+                    translated_cards += 1
+                    st.markdown(f"{'#' * (level + 1)} {escape_markdown(zh)}")
+            else:
+                st.markdown(f"{'#' * (level + 1)} {escape_markdown(b.text)}")
+
         st.caption(
             f"#{b.order} · 第{b.page}页 · 标题 L{b.level} · "
             f"{count_words(b.text)} 词 · {b.max_size:.1f}pt"
@@ -149,13 +305,27 @@ for b in blocks:
             f"{count_words(b.text)} 词 · {len(b.text)} 字符"
         )
         with st.expander(label, expanded=(expanded_used < expand_n)):
-            st.markdown(escape_markdown(b.text))
+            card_lang = render_language_toggle(f"lang_{b.order}")
+
+            if card_lang == LANG_ZH:
+                zh, error = translate_cached(b.text, backend, target)
+                if error:
+                    # 翻译失败不能阻塞阅读：提示错误，同时继续显示英文原文
+                    st.error(f"翻译失败：{error}")
+                    st.caption("下面仍然显示英文原文；问题解决后重新点「中文」即可。")
+                    st.markdown(escape_markdown(b.text))
+                else:
+                    translated_cards += 1
+                    st.markdown(escape_markdown(zh))
+            else:
+                st.markdown(escape_markdown(b.text))
+
         expanded_used += 1
 
 st.divider()
 
 # ============================================================
-# 第 6 部分：诊断面板（验证阅读顺序、定位双栏错位）
+# 第 7 部分：诊断面板（验证阅读顺序、定位双栏错位）
 # ============================================================
 with st.expander("🔍 解析诊断（验证阅读顺序、定位双栏错位）"):
     st.markdown("**① 每页排版检测**")
@@ -190,3 +360,15 @@ with st.expander("🔍 解析诊断（验证阅读顺序、定位双栏错位）
         "自查方法：看 ① 表的「检测排版」是否与你的 PDF 相符，"
         "再对照片子里的正文，看 ② 表的顺序是不是「先把左栏读完，再读右栏」。"
     )
+
+# ============================================================
+# 第 8 部分：卡片全部渲染完之后，把翻译计数填进侧边栏的占位符
+# ============================================================
+stats = st.session_state["translate_stats"]
+stats_slot.caption(
+    f"**翻译计数**（用来验证不重复请求）\n\n"
+    f"API 请求 **{stats['requests']}** 次 · 缓存命中 **{stats['hits']}** 次 · "
+    f"失败 {stats['errors']} 次\n\n"
+    f"累计翻译 {stats['chars']:,} 字符"
+    + (f" · 当前 {translated_cards} 张卡片显示为中文" if translated_cards else "")
+)
