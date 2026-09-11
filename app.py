@@ -16,6 +16,12 @@ r"""
 
 import streamlit as st
 
+from image_extractor import (
+    ASSOC_MAX_GAP,
+    associate_with_cards,
+    extract_images,
+    render_full_image,
+)
 from pdf_parser import count_words, escape_markdown, parse_pdf
 from translator import (
     BACKEND_LABELS,
@@ -107,6 +113,25 @@ def render_language_toggle(key: str):
         key=key,
         label_visibility="collapsed",
     )
+
+
+def get_full_image(pdf_bytes: bytes, image_item):
+    """
+    按需渲染一张图的完整尺寸，并做小缓存。
+
+    只缓存最近 2 张：大图动辄几百 KB 到几 MB，缓存太多会把内存吃满。
+    """
+    if "full_images" not in st.session_state:
+        st.session_state["full_images"] = {}
+    cache = st.session_state["full_images"]
+
+    if image_item.key not in cache:
+        with st.spinner("正在渲染大图…"):
+            cache[image_item.key] = render_full_image(pdf_bytes, image_item.xref, image_item.smask)
+        while len(cache) > 2:
+            cache.pop(next(iter(cache)))     # 先进先出，只留最近两张
+
+    return cache[image_item.key]
 
 
 st.title("📚 科研文献 PDF 智能阅读器")
@@ -233,6 +258,73 @@ blocks = result["blocks"]
 pages = result["pages"]
 
 # ============================================================
+# 第 4.5 部分：图片提取（带缓存）与文本卡片关联
+# ============================================================
+image_key = f"{uploaded_file.name}|{uploaded_file.size}"
+
+if st.session_state.get("image_key") != image_key:
+    with st.spinner("正在提取图片…"):
+        try:
+            image_data = extract_images(pdf_bytes)
+            association = associate_with_cards(image_data["images"], blocks)
+            st.session_state["image_result"] = image_data
+            st.session_state["image_assoc"] = association
+            st.session_state["image_error"] = None
+        except Exception as exc:
+            # 图片提取失败不影响正文阅读，降级为空列表并把原因记下来
+            st.session_state["image_result"] = {"images": [], "skipped": [], "elapsed": 0.0}
+            st.session_state["image_assoc"] = {"关联可靠": 0, "关联存疑": 0, "未关联": 0,
+                                               "存疑列表": [], "未关联列表": []}
+            st.session_state["image_error"] = f"{type(exc).__name__}: {exc}"
+    st.session_state["image_key"] = image_key
+
+image_result = st.session_state["image_result"]
+images = image_result["images"]
+association = st.session_state["image_assoc"]
+
+# 卡片 → 图片 的反向索引，用来在卡片标题上标出「这张卡片旁边有图」
+images_by_card = {}
+for img in images:
+    if img.card_order:
+        images_by_card.setdefault(img.card_order, []).append(img)
+
+# ---- 侧边栏：图片缩略图（按页码分组）----
+# 放在这里而不是脚本开头的侧边栏里，是因为此时才解析出图片清单。
+# Streamlit 允许脚本里出现多个 with st.sidebar 块，它们在侧边栏里按出现顺序排列。
+with st.sidebar:
+    st.divider()
+    st.header(f"🖼️ 文献图片（{len(images)} 张）")
+    st.caption(f"提取耗时 {image_result['elapsed']} 秒 · 点击「放大」在主区域查看大图")
+
+    if st.session_state.get("image_error"):
+        st.error("图片提取失败：" + st.session_state["image_error"])
+
+    if not images:
+        if not st.session_state.get("image_error"):
+            st.info(
+                "这个 PDF 里没有提取到插画。\n\n"
+                "注意：**用线条和文字画出来的矢量图**（比如流程图、伪代码框）不是图片对象，"
+                "本阶段只提取真正的位图插图。"
+            )
+    else:
+        grouped = {}
+        for img in images:
+            grouped.setdefault(img.page, []).append(img)
+
+        for page_no in sorted(grouped):
+            page_images = grouped[page_no]
+            with st.expander(f"第 {page_no} 页 · {len(page_images)} 张",
+                             expanded=(len(images) <= 4)):
+                cols = st.columns(2)
+                for index, img in enumerate(page_images):
+                    with cols[index % 2]:
+                        st.image(img.thumb, width="stretch")
+                        assoc_text = f"→ 卡片 #{img.card_order}" if img.card_order else "未关联卡片"
+                        st.caption(f"{img.pixel_w}×{img.pixel_h}px · {assoc_text}")
+                        if st.button("🔍 放大", key=f"zoom_{img.key}", width="stretch"):
+                            st.session_state["selected_image"] = img.key
+
+# ============================================================
 # 第 5 部分：解析概览
 # ============================================================
 st.subheader("📊 解析概览")
@@ -262,6 +354,42 @@ if result["total_chars"] < 200:
 st.divider()
 
 # ============================================================
+# 第 5.5 部分：图片详情（点击侧边栏「放大」后在这里显示大图）
+# ============================================================
+selected_key = st.session_state.get("selected_image")
+if selected_key:
+    selected = next((img for img in images if img.key == selected_key), None)
+    if selected is None:
+        # 换了文件，之前选中的图片已经不存在了
+        st.session_state.pop("selected_image", None)
+    else:
+        st.subheader(f"🖼️ 图片详情 · 第 {selected.page} 页")
+
+        col_image, col_meta = st.columns([3, 1])
+        with col_image:
+            st.image(
+                get_full_image(pdf_bytes, selected),
+                caption=f"{selected.key} · 原始 {selected.pixel_w}×{selected.pixel_h} px",
+                width="stretch",
+            )
+        with col_meta:
+            st.metric("原始像素", f"{selected.pixel_w}×{selected.pixel_h}")
+            st.caption(
+                f"页面上显示尺寸：{selected.disp_w:.0f} × {selected.disp_h:.0f} pt\n\n"
+                f"位置：({selected.bbox[0]:.0f}, {selected.bbox[1]:.0f}) "
+                f"→ ({selected.bbox[2]:.0f}, {selected.bbox[3]:.0f})"
+            )
+            if selected.card_order:
+                st.success(f"关联到卡片 #{selected.card_order}（距离 {selected.gap} pt）")
+            else:
+                st.warning("没有关联到文本卡片")
+            if st.button("关闭大图"):
+                st.session_state.pop("selected_image", None)
+                st.rerun()
+
+        st.divider()
+
+# ============================================================
 # 第 6 部分：卡片流（含中英切换）
 # ============================================================
 st.subheader("📖 阅读卡片")
@@ -275,6 +403,9 @@ expanded_used = 0        # 已展开的正文卡片数，用来实现「默认�
 translated_cards = 0     # 本次渲染里显示为中文的卡片数（统计用）
 
 for b in blocks:
+    # 这张卡片附近有几张图（用于在标题上标出来，方便对照阅读）
+    image_mark = f" · 🖼️×{len(images_by_card[b.order])}" if b.order in images_by_card else ""
+
     if b.kind == "heading":
         # 标题卡片：标题文字在左，语言切换在右
         level = min(max(b.level, 1), 4)
@@ -297,12 +428,12 @@ for b in blocks:
 
         st.caption(
             f"#{b.order} · 第{b.page}页 · 标题 L{b.level} · "
-            f"{count_words(b.text)} 词 · {b.max_size:.1f}pt"
+            f"{count_words(b.text)} 词 · {b.max_size:.1f}pt{image_mark}"
         )
     else:
         label = (
             f"#{b.order} · 第{b.page}页 · {_COLUMN_NAME[b.column]} · "
-            f"{count_words(b.text)} 词 · {len(b.text)} 字符"
+            f"{count_words(b.text)} 词 · {len(b.text)} 字符{image_mark}"
         )
         with st.expander(label, expanded=(expanded_used < expand_n)):
             card_lang = render_language_toggle(f"lang_{b.order}")
@@ -360,6 +491,34 @@ with st.expander("🔍 解析诊断（验证阅读顺序、定位双栏错位）
         "自查方法：看 ① 表的「检测排版」是否与你的 PDF 相符，"
         "再对照片子里的正文，看 ② 表的顺序是不是「先把左栏读完，再读右栏」。"
     )
+
+    st.markdown("**④ 图片与卡片的关联情况**")
+    if not images:
+        st.caption("这个 PDF 没有提取到位图插画（矢量图不算）。")
+    else:
+        st.write(
+            f"共 {len(images)} 张 · 可靠关联 **{association['关联可靠']}** 张 · "
+            f"存疑 {association['关联存疑']} 张 · 未关联 {association['未关联']} 张"
+        )
+        problems = association["未关联列表"] + association["存疑列表"]
+        if problems:
+            st.markdown(
+                f"下面 **{len(problems)}** 张没能可靠关联到文本卡片"
+                "（关联方式：取同页距离最近的文本块；距离超过 "
+                f"{ASSOC_MAX_GAP:.0f}pt 或同页无文本就算不可靠）："
+            )
+            st.dataframe([{
+                "图片": img.key,
+                "页码": img.page,
+                "位置": f"({img.bbox[0]:.0f}, {img.bbox[1]:.0f})",
+                "与最近卡片距离": f"{img.gap} pt" if img.gap >= 0 else "同页没有文本块",
+            } for img in problems], hide_index=True)
+        else:
+            st.success("所有图片都关联到了文本卡片。")
+
+    if image_result["skipped"]:
+        st.markdown(f"**⑤ 被跳过的图片（{len(image_result['skipped'])} 张）**")
+        st.dataframe(image_result["skipped"], hide_index=True)
 
 # ============================================================
 # 第 8 部分：卡片全部渲染完之后，把翻译计数填进侧边栏的占位符
