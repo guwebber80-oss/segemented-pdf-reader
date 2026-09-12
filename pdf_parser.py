@@ -56,6 +56,9 @@ _NUMBERED_RE = re.compile(r"^\d+(?:\.\d+)*\.?\s+[A-Z]")
 # 用来把公式块挡在标题之外。
 _STRONG_MATH_CHARS = set("←→≥≤∑∏∫‖⋅√±×÷≠≈")
 
+# 参与「单栏/双栏」判断的文本块，至少要这么多字符（过滤页眉、页码、编号等噪声）
+MIN_COLUMN_CHARS = 30
+
 
 def count_words(text: str) -> int:
     """英文词数：按空白切分。中文下这个数字没有意义，但阶段 1 只处理英文文献。"""
@@ -271,31 +274,66 @@ def extract_page_blocks(page, page_no: int, dehyphenate: bool = True):
 
 def detect_gutter(blocks, page_width: float):
     """
-    检测这一页是不是双栏排版。
+    检测这一页是不是双栏排版。返回中缝的 x 坐标；判定为单栏时返回 None。
 
-    原理：双栏排版一定存在一条「中缝」——一条竖直的空白带，
-    左边一堆块、右边一堆块，几乎没有块横跨它。
-    我们在页面宽度 32%~68% 的位置上滑动一条候选中缝，谁的证据最足就用谁。
+    思路（比「数块数」稳得多）：
+      把每个文本块的横向范围投影到 x 轴上，按【字符数】累加覆盖量。
+      双栏排版会在页面中部出现一条覆盖量明显偏低的竖直带，那就是中缝。
 
-    返回值：中缝的 x 坐标；判定为单栏时返回 None。
+    为什么不用块数：短标题、页码、公式编号会让块数统计严重失真。真实翻过的车——
+      Cell Press 某页左栏只有 2 个长块、右栏有 6 个，用「左右各 ≥3 块」的门槛一卡就
+      漏判成单栏，于是左右栏文字被按 y 坐标混排，摘要和正文串成了
+      "SUMMARY in which actresses remained still…" 这种读不通的句子。
     """
-    # 只用较长的块来判断，避开页眉、页码、短标题这些噪声
-    candidates = [b for b in blocks if len(b.text) > 40]
-    if len(candidates) < 6:
+    # 只用较长文本参与判断，避开页眉、页码、编号这类噪声
+    candidates = [b for b in blocks if len(b.text) >= MIN_COLUMN_CHARS]
+    total = sum(len(b.text) for b in candidates)
+    if len(candidates) < 4 or total < 400:
         return None
 
-    best = None
-    for gx in range(int(page_width * 0.32), int(page_width * 0.68) + 1, 3):
-        left = [b for b in candidates if b.x1 <= gx]        # 完全在中缝左边
-        right = [b for b in candidates if b.x0 >= gx]       # 完全在中缝右边
-        span = [b for b in candidates if b.x0 < gx < b.x1]  # 横跨中缝
+    lo, hi = int(page_width * 0.25), int(page_width * 0.75)
+    if hi - lo < 20:
+        return None
 
-        # 判定门槛：左右各自至少 3 块，且左右块数之和占绝大多数
-        if len(left) >= 3 and len(right) >= 3 and (len(left) + len(right)) >= 0.7 * len(candidates):
-            # 打分：左右越均衡越好，横跨中缝的块越少越好
-            score = min(len(left), len(right)) - 2.0 * len(span)
-            if best is None or score > best[0]:
-                best = (score, gx)
+    # 覆盖量投影：cover[i] = 覆盖住该 x 位置的所有文本块的字符数之和
+    cover = [0] * (hi - lo + 1)
+    for b in candidates:
+        a, z = max(int(b.x0), lo), min(int(b.x1), hi)
+        if z < a:
+            continue
+        chars = len(b.text)
+        for index in range(a - lo, z - lo + 1):
+            cover[index] += chars
+
+    peak = max(cover)
+    if peak <= 0:
+        return None
+
+    threshold = 0.45 * peak        # 覆盖量低于峰值的 45% 才算「空白带」
+    best = None
+    index, width = 0, len(cover)
+
+    while index < width:
+        if cover[index] > threshold:
+            index += 1
+            continue
+
+        start = index
+        while index < width and cover[index] <= threshold:
+            index += 1
+        end = index - 1
+
+        if end - start + 1 >= 6:                      # 中缝至少要 6pt 宽
+            center = lo + (start + end) // 2
+            left_chars = sum(len(b.text) for b in candidates if b.x1 <= center)
+            right_chars = sum(len(b.text) for b in candidates if b.x0 >= center)
+            span_chars = sum(len(b.text) for b in candidates if b.x0 < center < b.x1)
+
+            # 两侧都要有足够文字（否则那只是「一侧是图」的页面，不是双栏）
+            if left_chars >= 0.15 * total and right_chars >= 0.15 * total:
+                score = min(left_chars, right_chars) - 2 * span_chars
+                if best is None or score > best[0]:
+                    best = (score, center)
 
     return best[1] if best else None
 
