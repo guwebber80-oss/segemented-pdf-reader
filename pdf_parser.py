@@ -5,23 +5,35 @@ PDF 解析模块 —— 从 PDF 字节流里提取「按阅读顺序排列的文
 
 主要流程（parse_pdf）：
     PDF 字节流
-      → 逐页取出文本块（extract_page_blocks）
+      → 逐页取出**原子块**（extract_page_blocks，含字符级修复与公式行拆分）
       → 判断单栏/双栏（detect_gutter）
       → 按阅读顺序重排（order_blocks）
-      → 拼回被拆开的段落（merge_paragraphs）
+      → 估算正文字号 / 识别标题 / 内容角色分类
+      → 公式三级标记 + 区域聚类（formula_finder）→ 确认的公式移出文字流
+      → 段落分组（build_paragraph_groups，纯派生，不破坏原子块）
       → 超长段落切卡片（split_long_block）
-      → 识别标题（estimate_body_size + mark_headings）
       → 卡片列表
 
-注：阶段 5 做代码重构时，本文件会搬到 utils/pdf_parser.py，内容不变。
+【两层数据模型】
+    原子块（Block）：从 PDF 提取的最小文本块，**任何阶段都不得原地改写它的 text**。
+        段落拼接、公式剔除都是「派生」——需要段落文本时按分组即时拼接。
+    段落（Paragraph）：由若干原子块派生出的自然段视图，是 Block 的子类，
+        会写角色（role）等派生属性，最后再回写到原子块上。
+
+    为什么要这么分：以前 merge_paragraphs 直接把后一块的文本塞进前一块，
+    一旦公式碎片被并进散文，后面所有基于块的公式判定就再也看不到它了
+    （第九页那个求和公式就是这么消失的）。原子不可变之后，这种事故不可能再发生。
 """
 
 import re
 import time
+import unicodedata
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, fields, replace
 
 import pymupdf      # PDF 解析核心（PyMuPDF；新版推荐 import pymupdf，旧的 fitz 已弃用）
+
+import formula_finder   # 公式锚点表、三级判据、区域聚类（本模块依赖它，它不反向依赖本模块）
 
 
 # ============================================================
@@ -58,6 +70,283 @@ _STRONG_MATH_CHARS = set("←→≥≤∑∏∫‖⋅√±×÷≠≈")
 
 # 参与「单栏/双栏」判断的文本块，至少要这么多字符（过滤页眉、页码、编号等噪声）
 MIN_COLUMN_CHARS = 30
+
+# ------------------------------------------------------------
+# 内容角色：把「正文」和「论文背景信息」分开
+# 用户的明确需求——阅读卡片只放正文，其余信息单独呈现
+# ------------------------------------------------------------
+ROLE_BODY = "body"                    # 正文（会进阅读卡片）
+ROLE_HEADING = "heading"              # 章节标题（进阅读卡片，作为分区标题）
+ROLE_CAPTION = "caption"              # 图注/表注（按用户要求：视作正文，留在阅读流里）
+ROLE_HEADER_FOOTER = "header_footer"  # 页眉、页脚、页码、running head
+ROLE_AUTHOR = "author"                # 作者、单位、联系方式
+ROLE_COPYRIGHT = "copyright"          # 版权、许可、资助声明
+ROLE_REFERENCE = "reference"          # 参考文献条目
+ROLE_LABEL = "label"                  # 期刊栏目名/标签（Authors、Highlights、CCS Concepts…）
+ROLE_FRONT_MATTER = "front_matter"    # 封面页/前页信息（Highlights、In Brief、作者、单位）
+
+ROLE_NAMES = {
+    ROLE_BODY: "正文",
+    ROLE_HEADING: "章节标题",
+    ROLE_CAPTION: "图注",
+    ROLE_HEADER_FOOTER: "页眉页脚",
+    ROLE_AUTHOR: "作者与单位",
+    ROLE_FRONT_MATTER: "封面页信息",
+    ROLE_COPYRIGHT: "版权/许可/资助",
+    ROLE_REFERENCE: "参考文献",
+    ROLE_LABEL: "栏目名/标签",
+}
+
+# 留在阅读卡片里的角色（图注按用户要求视作正文）
+READING_ROLES = (ROLE_BODY, ROLE_CAPTION)
+
+# 图注：必须是 "Figure 3." / "Fig. 2:" 这种「编号 + 标点」形式。
+# 不能简单用 "Figure 4 illustrates…" 匹配——那是正文在引用图，不是图注。
+_CAPTION_RE = re.compile(
+    r"^\s*(fig(?:ure)?|tab(?:le)?|scheme|box|supplementary\s+fig(?:ure)?)\s*\.?\s*\d+\s*[:.、]", re.I)
+
+# 版权 / 许可 / 资助声明
+_COPYRIGHT_RE = re.compile(
+    r"(©|ª\s?\d{4}|copyright|all rights reserved|licensed under|this work is licensed|"
+    r"creative commons|publication date|acm isbn|issn|isbn|permission to make|"
+    r"this (project|work|study|research) (has been|was) (partially )?(supported|funded)|"
+    r"grant (agreement|number)|horizon 20\d\d|national natural science foundation|"
+    r"open access article|declaration of interests|competing interests)", re.I)
+
+# 期刊栏目名 / 标签（整块就是这几个词）
+_LABEL_RE = re.compile(
+    r"^\s*(authors?|highlights?|keywords?|key words|correspondence|in brief|"
+    r"ccs concepts|additional key words and phrases|acm reference format|"
+    r"abstract|summary|graphical abstract|editor'?s note|research highlights|"
+    r"author contributions|data availability|supplementary (information|material)s?|"
+    r"report|article|review|letter|editorial|commentary|perspective)\s*[:：]?\s*$", re.I)
+
+# 参考文献标题
+_REFERENCES_HEADING_RE = re.compile(
+    r"^\s*(references|bibliography|literature cited|works cited|reference list)\s*$", re.I)
+
+# 参考文献条目的样子：[12] 开头，或 "12. Smith, J." 开头
+_REFERENCE_ITEM_RE = re.compile(r"^\s*(\[\d{1,3}\]|\d{1,3}\.\s+[A-Z][a-zA-Z’'\-]+,)")
+
+# 单位/联系方式的关键词
+_AFFILIATION_RE = re.compile(
+    r"(university|universit|institut|department|faculty|school of|college|laborator|"
+    r"centre for|center for|academy|hospital|clinic|gmbh|ltd|inc\.|corp\.|"
+    r"correspondence|corresponding author|e-?mail|@)", re.I)
+
+# 章节编号："2.1"、"3.1.2"、"4."
+_SECTION_NUMBER_RE = re.compile(r"^\s*(\d+(?:\.\d+)*)\.?\s+(.+)$")
+
+# 期刊刊头（不是论文章节）：Report / Current Biology Report / Journal of …
+_MASTHEAD_RE = re.compile(
+    r"^\s*(report|article|review|letter|editorial|commentary|perspective|communication|"
+    r"research article|original article|brief report|"
+    r"(current|frontiers in|journal of|proceedings of|ieee|acm|plos|nature|science|cell)\b.*)"
+    r"\s*$",
+    re.IGNORECASE)
+
+# 图内面板标签："A B C D" / "E F G H"（多子图排版的角标），不是章节
+_PANEL_LABEL_RE = re.compile(r"^(?:[A-Z]\s+){1,}[A-Z]$")
+
+# ------------------------------------------------------------
+# 公式 / 统计量的字符级修复
+# ------------------------------------------------------------
+
+# ① 数学字母符号（𝑇 𝑣 𝑥 这类 U+1D400–U+1D7FF）用 NFKC 归一化成普通字母。
+#    不处理的话它们既难读、也没法翻译（翻译 API 会把它们当乱码符号）。
+_MATH_ALNUM_MAP = {}
+for _codepoint in range(0x1D400, 0x1D800):
+    _char = chr(_codepoint)
+    _normalized = unicodedata.normalize("NFKC", _char)
+    if _normalized != _char:
+        _MATH_ALNUM_MAP[_codepoint] = _normalized
+
+# ② 上标 / 下标 → Unicode 上下标字符。很多期刊 PDF 的「上标位」标志位根本没设，
+#    只能靠「字号更小 + 基线偏移」来判断：底边高于本行 → 上标，底边低于本行 → 下标。
+_SUPER_FROM = "0123456789+-=()abcdefghijklmnoprstuvwxyz"
+_SUPER_TO = "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻ"
+_SUPERSCRIPT_MAP = str.maketrans(_SUPER_FROM, _SUPER_TO)
+
+# Unicode 的下标字母不全（缺 b c d f g q w y z），所以下标只在「整段都能转」时才转，
+# 否则退回 _ 记号（例如 u_primary、p_torso）——这既保证可读，也不会缺字。
+_SUB_FROM = "0123456789+-=()aehijklmnoprstuvx"
+_SUB_TO = "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₕᵢⱼₖₗₘₙₒₚᵣₛₜᵤᵥₓ"
+_SUBSCRIPT_MAP = str.maketrans(_SUB_FROM, _SUB_TO)
+
+
+def _to_superscript(text: str) -> str:
+    """转成 Unicode 上标；有字符没有上标形式就退回 ^ 记号"""
+    stripped = text.strip()
+    if stripped and all(ch in _SUPER_FROM for ch in stripped):
+        return text.translate(_SUPERSCRIPT_MAP)
+    return "^" + stripped
+
+
+def _to_subscript(text: str) -> str:
+    """转成 Unicode 下标；有字符没有下标形式就退回 _ 记号（Unicode 下标字母不全）"""
+    stripped = text.strip()
+    if stripped and all(ch in _SUB_FROM for ch in stripped):
+        return text.translate(_SUBSCRIPT_MAP)
+    return "_" + stripped
+
+
+def _convert_script(text: str, converter) -> str:
+    """
+    转换上下标，但把尾部标点留在外面：
+    PDF 里 "𝑖," 这种「下标字母 + 逗号」很常见，直接转会得到 "ᵢ," 看着还行，
+    但多字符下标退回 _ 记号时会变成 "_i,"，标点留在外面更干净。
+    """
+    core, trailing = text, ""
+    while core and core[-1] in ",.;:":
+        trailing = core[-1] + trailing
+        core = core[:-1]
+    if not core:
+        return text
+    return converter(core) + trailing
+
+
+# 数学排版里 "idᵢto"、"x²y" 这种「上下标后面直接接字母」是常态，
+# 压成一行文字后会连成一坨，这里补一个空格方便阅读。
+_SCRIPT_CHARS = re.escape(_SUPER_TO + _SUB_TO)
+_SCRIPT_SPACING_RE = re.compile(f"([{_SCRIPT_CHARS}]+)([A-Za-z])")
+
+
+def add_script_spacing(text: str) -> str:
+    """上下标字符后面紧跟拉丁字母时补一个空格（纯排版可读性）"""
+    return _SCRIPT_SPACING_RE.sub(r"\1 \2", text)
+
+
+# ------------------------------------------------------------
+# 公式块判定：决定哪些块「渲染成图片」而不是塞进一行文字
+# ------------------------------------------------------------
+# 判定逻辑（锚点表 / 三级判据 / 区域聚类）已经独立到 formula_finder.py。
+# 这里只保留提取阶段要用的别名，以及「按栏位算左边界」这类解析器自己的活。
+_FORMULA_SCRIPT_RE = formula_finder.SCRIPT_RE        # 上下标记号
+_MATH_FONT_RE = formula_finder.MATH_FONT_RE          # 数学字体
+_MATH_ANCHORS = formula_finder.MATH_ANCHORS          # 数学锚点（符号）
+
+
+def _looks_mathy(text: str) -> bool:
+    """
+    行级判断：这一行是不是「像公式」？
+    用于把独立成行的公式从段落里拆出来（比块级判定宽松一点，因为拆错的代价小）。
+    """
+    return formula_finder.looks_mathy(text)
+
+
+def looks_like_formula(block) -> bool:
+    """
+    单个块是否达到「强公式」的分数门槛。
+    保留这个接口是为了诊断脚本兼容；正式管线用的是三级标记 _mark_formula_tiers。
+    """
+    return formula_finder.formula_score(block) >= formula_finder.STRONG_THRESHOLD
+
+
+def column_margins(blocks) -> dict:
+    """
+    每个「页 × 栏」的正文左边界（用来判断公式有没有缩进）。
+
+    取 x0 里**出现 ≥2 次的最左位置**（没有任何重复值时退回最小值）。
+
+    为什么不能用中位数：公式碎片多的页面上，碎片块的数量会超过正文段落，
+    中位数会被推到碎片位置上——实测单栏.pdf 第 9 页的「左边界」被算成 192.8pt
+    （真实边界是 46pt），于是页面上真正的公式全被判成「没有缩进」而降级。
+
+    为什么也不能用众数：算法清单页里，缩进的清单行（x≈48）比正文段落还多，
+    众数会选到清单的缩进位置，同样把真正的左边距（46）顶掉。
+
+    「出现 ≥2 次的最左位置」两头都能防住：正文左边界在同一栏里一定会重复出现，
+    而它总是最靠左的那一批。
+    """
+    collected = {}
+    for block in blocks:
+        if block.role == ROLE_BODY:
+            collected.setdefault((block.page, block.column), []).append(block.x0)
+
+    margins = {}
+    for key, values in collected.items():
+        counter = Counter(round(value) for value in values)
+        repeated = [value for value, count in counter.items() if count >= 2]
+        margins[key] = min(repeated) if repeated else min(values)
+    return margins
+
+
+def mark_formula_tiers(blocks, margins: dict) -> None:
+    """
+    给每个块标出公式等级（就地写 formula_tier）：
+
+        "strong"    判据充分，可以单独成图，也可以当区域聚类的种子；
+        "weak"      有数学证据但不充分（分数 2~3，或分数够但没过防线）——
+                    只能加入已有区域；只有「相对所在栏有缩进 + 数学字体」时才允许当种子；
+        "fragment"  公式碎片（短、无句末标点、无散文虚词）——
+                    **只能被区域吸收，绝不单独成图**，这是「不把半句话变成图片」的关键；
+        ""          普通文字。
+
+    这里只管「谁有资格参与公式判定」：
+      · 只有进阅读流的角色（正文、图注）参与，标题与背景信息一律不判定；
+      · 提取阶段已经拆出来的公式行有结构证据（居中 + 数学字体 + 符号密度），
+        直接算强候选，但仍然要过一遍「单独成图」的防线，没过就降为弱候选。
+    """
+    for block in blocks:
+        if block.role not in READING_ROLES or block.kind == "heading":
+            block.formula_tier = ""
+            block.is_formula = False
+            continue
+
+        margin = margins.get((block.page, block.column))
+        if block.is_formula:                    # 提取阶段的结构证据
+            block.formula_tier = (
+                "strong" if formula_finder.passes_standalone_guards(block, margin) else "weak")
+        else:
+            block.formula_tier = formula_finder.classify(block, margin)
+
+
+def apply_clusters(blocks, clusters, reading_roles=READING_ROLES) -> None:
+    """
+    把聚类结果写回原子块：簇内成员标上 cluster_id，并统一 is_formula。
+
+    这里把 is_formula 的语义**收紧成一个**：属于某个已确认的公式区域。
+    提取阶段曾经把「拆出来的公式行」也标成 is_formula，但那只是候选——
+    如果没进簇就出图，就会出现一张「半句话」的图片
+    （实测 Nature 那篇的 "ₜₑₓₜ, φₖ, uₜ), where b^′" 就是这么冒出来的）。
+
+    **只有进阅读流的角色**才会被标成公式：标题与背景信息（作者、参考文献、表格页脚…）
+    里的块如果被吸进簇，会出现「文字从正文里消失了、却没有任何图片替代」的内容丢失。
+    """
+    for cluster in clusters:
+        for index in cluster.atom_indices:
+            if blocks[index].role not in reading_roles:
+                continue
+            blocks[index].cluster_id = cluster.cluster_id
+
+    for block in blocks:
+        block.is_formula = block.cluster_id >= 0
+
+# ③ 子集字体把希腊字母错映射成拉丁字母的修复表。
+#    真实案例：Cell Press 用「单字形子集字体」画 η，提取出来变成 "h"，
+#    于是 "ηp² = 0.16" 成了 "hp2 = 0.16"。字体里的信息已经彻底丢失
+#    （glyph 名就被改写成 "LATIN SMALL LETTER H"），只能在统计量上下文里按模式修。
+#    后面必须紧跟 = < >，避免误伤普通文字里的 h。
+_STATS_SYMBOL_FIXES = (
+    (re.compile(r"\bh\s*p\s*(?:²|2)(?=\s*[=<>])"), "ηp²"),
+    (re.compile(r"\bh\s*(?:²|2)(?=\s*[=<>])"), "η²"),
+)
+
+
+def repair_stats_symbols(text: str) -> str:
+    """在统计量上下文里修回被字体错映射的希腊字母（ηp² / η²）"""
+    for pattern, replacement in _STATS_SYMBOL_FIXES:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def parse_section(text: str):
+    """把章节标题拆成（编号, 标题）。没有编号的（Abstract/References）编号返回空串。"""
+    stripped = text.strip()
+    match = _SECTION_NUMBER_RE.match(stripped)
+    if match:
+        return match.group(1), match.group(2).strip()
+    return "", stripped
 
 
 def count_words(text: str) -> int:
@@ -126,7 +415,15 @@ def escape_markdown(text: str) -> str:
 
 @dataclass
 class Block:
-    """一个文本块。PDF 里的一「块」通常就对应一个自然段。"""
+    """
+    一个**原子块**：从 PDF 提取出来的最小文本块（PDF 里的一「块」通常是一个自然段，
+    也可能是被拆出来的标题行、公式行）。
+
+    【重要】原子块是不可变的：任何阶段都不许改写它的 text。
+    段落拼接、公式剔除、角色标注都是「派生」——需要段落文本时按分组即时拼接
+    （见 build_paragraph_groups / Paragraph）。以前直接改 text 的做法会把公式碎片
+    并进散文，之后再也找不回来。
+    """
     page: int           # 页码，从 1 开始
     x0: float           # 左边界坐标
     y0: float           # 上边界坐标（PDF 坐标系原点在左上角，y 向下增大）
@@ -140,6 +437,30 @@ class Block:
     kind: str = "body"  # body 正文 / heading 标题
     level: int = 0      # 标题级别：1 最大，2 次之，3 最小
     order: int = 0      # 全局阅读顺序号
+    role: str = ROLE_BODY       # 内容角色：正文 / 页眉页脚 / 作者单位 / 参考文献…
+    section_number: str = ""    # 所属章节编号，如 "2.1"
+    section_title: str = ""     # 所属章节标题
+    page_end: int = 0           # 卡片跨页时的结束页（普通块等于 page）
+    card_index: int = 0         # 阅读卡片编号（聚合后才有意义）
+    segments: list = field(default_factory=list)        # 卡片内部结构：[("heading"|"text", 文本)]
+    headings_inside: list = field(default_factory=list)  # 卡片内部包含的章节 [(编号, 标题), …]
+    is_formula: bool = False    # 是否属于某个已确认的公式区域（渲染成图片、移出文字流）
+    formula_tier: str = ""      # 公式等级：strong / weak / fragment / ""（见 mark_formula_tiers）
+    cluster_id: int = -1        # 所属公式区域编号（-1 = 不属于任何公式区域）
+    font_names: tuple = ()      # 块内出现的字体名（数学字体是公式的强证据）
+    origin_baseline: float = 0.0  # 块内行的中位基线 y（上下标判定的基准）
+
+
+@dataclass
+class Paragraph(Block):
+    """
+    由若干原子块**派生**出的自然段视图（Block 的子类，字段全部继承）。
+
+    它只是一个视图：写它的 role/kind 不会影响原子块，等分类结束后再由
+    propagate_paragraph_roles 把角色回写到原子块上。卡片构建、内容分类、
+    背景信息面板读的都是这一层——因为它们要的是「读出完整的一段话」。
+    """
+    atom_indices: list = field(default_factory=list)   # 组成这个段落的原子块下标
 
 
 # ============================================================
@@ -154,20 +475,53 @@ def _line_records(raw_block):
     """
     records = []
     for line in raw_block.get("lines", []):
-        spans = line.get("spans", [])
-        text = "".join(span.get("text", "") for span in spans)
+        # 注意：纯空白的 span（词与词之间的空格）也必须参与拼接，
+        # 否则文本会变成 "Atotalof28participants" 这种挤在一起的样子
+        visible = [span for span in line.get("spans", []) if span.get("text", "").strip()]
+        if not visible:
+            continue
 
-        sizes, bold_chars, total_chars = [], 0, 0
-        for span in spans:
+        # 行内基准：取「字号最大的 span」当主文本，用它的字号 + **基线**（origin[1]）当基准。
+        # 为什么用基线而不是 bbox：PyMuPDF 的 span bbox 包含字体升降部，
+        # 「同基线的小字号文字」和「真正的下标」在 bbox 上几乎分不开，而基线一测就准。
+        main_span = max(visible, key=lambda s: float(s.get("size", 0)))
+        base_size = float(main_span.get("size", 0))
+        base_baseline = main_span["origin"][1]
+
+        parts, sizes, bold_chars, total_chars = [], [], 0, 0
+        for span in line.get("spans", []):
             span_text = span.get("text", "")
-            if not span_text.strip():
+            if not span_text:
                 continue
-            sizes.append(float(span.get("size", 0)))
-            total_chars += len(span_text)
-            # flags 第 4 位（值 16）代表粗体
-            if int(span.get("flags", 0)) & 16:
-                bold_chars += len(span_text)
 
+            # ① 数学字母符号归一化成普通字母（𝑇 → T、𝑣 → v）
+            span_text = span_text.translate(_MATH_ALNUM_MAP)
+
+            if span_text.strip():
+                size = float(span.get("size", 0))
+                baseline = span["origin"][1]
+
+                # ② 字号更小 + 基线抬高 → 上标；③ 字号更小 + 基线压低 → 下标
+                #    再加「长度 ≤15 字符」的限制，避免把作者单位那类小字号文字误判进去
+                smaller = base_size > 0 and size <= base_size * 0.85 \
+                    and len(span_text.strip()) <= 15
+                raised = (base_baseline - baseline) >= max(0.8, 0.25 * size)
+                lowered = (baseline - base_baseline) >= max(0.6, 0.20 * size)
+
+                if smaller and raised:
+                    span_text = _convert_script(span_text, _to_superscript)
+                elif smaller and lowered:
+                    span_text = _convert_script(span_text, _to_subscript)
+
+                sizes.append(size)
+                total_chars += len(span_text)
+                # flags 第 4 位（值 16）代表粗体
+                if int(span.get("flags", 0)) & 16:
+                    bold_chars += len(span_text)
+
+            parts.append(span_text)
+
+        text = "".join(parts)
         bbox = line.get("bbox") or (0.0, 0.0, 0.0, 0.0)
         records.append({
             "text": text,
@@ -177,6 +531,13 @@ def _line_records(raw_block):
             "chars": total_chars,
             "bbox": bbox,
             "height": bbox[3] - bbox[1],
+            # 这一行是否用了数学字体（公式的强证据）
+            "math_font": any(_MATH_FONT_RE.search(str(span.get("font", "")))
+                             for span in visible),
+            # 这一行的基准基线（上下标判定的基准，也是公式片段的证据之一）
+            "baseline": base_baseline,
+            # 这一行用到的字体名（公式判定里「有没有用数学字体」）
+            "fonts": tuple(str(span.get("font", "")) for span in visible if span.get("font")),
         })
     return records
 
@@ -218,14 +579,98 @@ def _split_leading_heading(records):
     return records[:k], records[k:]
 
 
+def _split_formula_lines(records):
+    """
+    把「独立成行的公式」从段落里拆出来，返回 [(行记录列表, 是否公式), …]。
+
+    为什么必须拆：很多论文的公式是**单独一行、居中或缩进**的（比正文行短），
+    但 PDF 的块划分常把它和前后散文归进同一个块；不拆的话它会被当成正文
+    粘进段落里，后面所有基于「块」的公式判定都看不到它，永远转不成图片。
+
+    判据（错拆的代价很小，所以可以宽松些）：
+      · 行宽明显小于本块最宽行（<0.8 倍）——公式行通常短且居中
+      · 词数 ≤20
+      · 符号密度够高（_looks_mathy）
+    """
+    if len(records) < 2:
+        return [(records, False)]
+
+    widths = [r["bbox"][2] - r["bbox"][0] for r in records]
+    widest = max(widths) or 1.0
+    left_margin = min(r["bbox"][0] for r in records)
+
+    groups, current = [], []
+    for record, width in zip(records, widths):
+        text = record["text"].strip()
+        # 判据（三道都要满足）：
+        #   ① 明显比最宽行短，**且左右两边都留白**（真正的居中公式）——
+        #      只用「比最宽行短」是不行的：段落的最后一行本来就短，
+        #      实测把 "group, F(1, 31) = 5.92, p = 0.021, hₚ" 这种句子碎片拆成了公式图；
+        #   ② 用了数学字体（公式的强证据，段落散文不会用）；
+        #   ③ 符号密度够高。
+        left_slack = record["bbox"][0] - left_margin
+        right_slack = (left_margin + widest) - record["bbox"][2]
+        is_display_formula = (
+            width < widest * 0.8
+            and left_slack >= 12.0
+            and right_slack >= 12.0
+            and record.get("math_font", False)
+            and count_words(text) <= 20
+            and _looks_mathy(text)
+            # 还要有「公式结构」：比较运算符或上下标。
+            # 只靠箭头符号（图里的 −−−→ 之类）不算，那是指示线不是公式。
+            and (bool(set(text) & set("=≤≥≠<>")) or bool(_FORMULA_SCRIPT_RE.search(text)))
+        )
+        if is_display_formula:
+            if current:
+                groups.append((current, False))
+                current = []
+            groups.append(([record], True))
+        else:
+            current.append(record)
+    if current:
+        groups.append((current, False))
+    return [group for group in groups if group[0]]
+
+
+def _is_standalone_formula_line(record, page_width: float) -> bool:
+    """
+    单行块是不是一条独立公式？
+
+    为什么需要单独一套判据：_split_formula_lines 靠「比块内最宽行短」判断，
+    那需要块内有多行做参照；而**很多公式在 PDF 里本来就是一个独立的单行块**
+    （实测 `v_threshold = k⋅v̄ᵢ` 就是这种）。这类块如果不在这里判出来，
+    后面会被段落合并粘进上一行散文（因为它的首字符是数学斜体小写字母），
+    再因为整块词数超限而被公式判定拒掉——永远转不成图片。
+
+    判据：明显窄于页面 + 用了数学字体 + 符号密度高 + 有比较符或上下标。
+    """
+    text = record.get("text", "").strip()
+    if not text or count_words(text) > 14:
+        return False
+    if not record.get("math_font", False):
+        return False
+
+    width = record["bbox"][2] - record["bbox"][0]
+    if width > page_width * 0.6:            # 公式行不会占满版面宽度
+        return False
+    if not _looks_mathy(text):
+        return False
+    return bool(set(text) & set("=≤≥≠<>")) or bool(_FORMULA_SCRIPT_RE.search(text))
+
+
 def _make_block(page_no: int, records, dehyphenate: bool):
     """把若干行记录合成一个 Block（坐标取并集，字号/加粗按内容汇总）"""
     text = join_lines([r["text"] for r in records], dehyphenate).strip()
+    text = add_script_spacing(text)
+    text = repair_stats_symbols(text)
     if not text:
         return None
 
     sizes = [r["max_size"] for r in records]
     heights = sorted(r["height"] for r in records)
+    baselines = sorted(r.get("baseline", 0.0) for r in records)
+    fonts = tuple(dict.fromkeys(f for r in records for f in r.get("fonts", ())))
     chars = sum(r["chars"] for r in records)
     bold_chars = sum(r["bold_chars"] for r in records)
 
@@ -239,6 +684,8 @@ def _make_block(page_no: int, records, dehyphenate: bool):
         max_size=max(sizes) if sizes else 0.0,
         bold_ratio=(bold_chars / chars) if chars else 0.0,
         line_height=heights[len(heights) // 2] if heights else 10.0,
+        font_names=fonts,
+        origin_baseline=baselines[len(baselines) // 2] if baselines else 0.0,
     )
 
 
@@ -261,12 +708,20 @@ def extract_page_blocks(page, page_no: int, dehyphenate: bool = True):
         if not records:
             continue
 
-        # 可能需要把块首的标题行拆出来，所以一个 PyMuPDF 块最多产出两个 Block
+        # 一个 PyMuPDF 块可能产出多个 Block：
+        #   · 块首的标题行要拆出来（_split_leading_heading）
+        #   · 独立成行的公式也要拆出来（_split_formula_lines）
         for part in _split_leading_heading(records):
             if not part:
                 continue
-            block = _make_block(page_no, part, dehyphenate)
-            if block is not None:
+            for piece, is_formula in _split_formula_lines(part):
+                block = _make_block(page_no, piece, dehyphenate)
+                if block is None:
+                    continue
+                # 单行块用另一套判据（拆行判据需要块内有多行做宽度参照）
+                if not is_formula and len(piece) == 1:
+                    is_formula = _is_standalone_formula_line(piece[0], page.rect.width)
+                block.is_formula = is_formula
                 blocks.append(block)
 
     return blocks
@@ -392,6 +847,10 @@ def _should_merge(prev: Block, cur: Block) -> bool:
     判断相邻两块是不是「同一个自然段被 PDF 拆开了」。
     采取保守策略：宁可少合并，也不要错合并（错合并会让两张卡片粘成一张）。
     """
+    # 公式块不参与段落合并：否则拆出来的公式行又会被粘回散文里
+    if prev.is_formula or cur.is_formula:
+        return False
+
     if cur.page == prev.page + 1:
         gap = 0.0                     # 跨页：y 坐标会重置，无法比较间距，视为紧邻
     elif cur.page != prev.page:
@@ -421,26 +880,119 @@ def _should_merge(prev: Block, cur: Block) -> bool:
         return False                  # 正常段落结尾 → 到此为止
 
     # 剩下情况：前块没写完（缺句末标点），后块以小写字母开头 → 认为是同段续写
-    return cur.text[:1].islower()
+    first_char = cur.text[:1]
+    if first_char.islower():
+        return True
+
+    # 上标被拆到下一块开头也是同一段的续写：
+    # 例如 "...p = 0.021, hp" | "² = 0.16), demonstrating…"
+    return bool(re.match(r"[\d²³¹⁰⁴⁵⁶⁷⁸⁹₀-₉)\]},;%·]", first_char))
 
 
-def merge_paragraphs(blocks):
-    """把同一段的碎块拼回一整段。"""
-    merged = []
-    for b in blocks:
-        if merged and _should_merge(merged[-1], b):
-            prev = merged[-1]
-            if prev.text.endswith(("-", "‐", "\xad")):
-                prev.text = prev.text[:-1] + b.text
-            else:
-                prev.text = f"{prev.text} {b.text}"
-            prev.x0, prev.y0 = min(prev.x0, b.x0), min(prev.y0, b.y0)
-            prev.x1, prev.y1 = max(prev.x1, b.x1), max(prev.y1, b.y1)
-            prev.max_size = max(prev.max_size, b.max_size)
-            prev.line_height = min(prev.line_height, b.line_height)
-        else:
-            merged.append(b)
-    return merged
+def build_paragraph_groups(blocks) -> list:
+    """
+    把原子块按「同一自然段」分组，返回索引分组，例如 [[0], [1, 2], [3], …]。
+
+    **纯派生**：不修改任何原子块，随时可以重算或回退——这正是本轮修复的核心。
+    旧版 merge_paragraphs 直接把后一块的文本塞进前一块，公式碎片一旦被并进散文，
+    后面所有基于块的公式判定就再也看不到它了。
+
+    两条规则：
+      · 已经带公式等级的块（强 / 弱 / 碎片）**各自单独成组**，
+        否则碎片会被当成段落续写吞掉；
+      · 其余按 _should_merge 的保守规则判断「后一块是不是前一块的续写」。
+    """
+    groups = []
+    for index, block in enumerate(blocks):
+        if block.is_formula or block.formula_tier:
+            groups.append([index])
+            continue
+        if groups and _should_merge(blocks[groups[-1][-1]], block):
+            groups[-1].append(index)
+            continue
+        groups.append([index])
+    return groups
+
+
+def build_paragraphs(blocks, groups, dehyphenate: bool = True) -> list:
+    """
+    按索引分组拼出段落视图（Paragraph）。
+
+    视图是派生对象：写它的 role / kind 不会影响原子块，
+    需要时再由 propagate_paragraph_roles 把结论回写到原子块。
+    """
+    paragraphs = []
+    for group in groups:
+        members = [blocks[index] for index in group]
+        first = members[0]
+        total_chars = max(sum(len(b.text) for b in members), 1)
+
+        kwargs = {f.name: getattr(first, f.name) for f in fields(Block)}
+        kwargs.update(
+            text=_join_pieces(members, dehyphenate),
+            page=min(b.page for b in members),
+            page_end=max(b.page_end or b.page for b in members),
+            x0=min(b.x0 for b in members),
+            y0=min(b.y0 for b in members),
+            x1=max(b.x1 for b in members),
+            y1=max(b.y1 for b in members),
+            max_size=max(b.max_size for b in members),
+            line_height=min(b.line_height for b in members),
+            bold_ratio=sum(b.bold_ratio * len(b.text) for b in members) / total_chars,
+            # 聚合出来的视图不继承原子块的卡片字段（避免共享可变对象）
+            segments=[], headings_inside=[], card_index=0,
+            atom_indices=list(group),
+        )
+        paragraphs.append(Paragraph(**kwargs))
+    return paragraphs
+
+
+def build_paragraph_layer(blocks, merge_on: bool = True, dehyphenate: bool = True):
+    """一次算好「分组索引 + 段落视图」，返回 (groups, paragraphs)。
+
+    分组是纯派生，可以在管线里算多次（公式判定前后各算一次）：
+    第二次算出来的分组会把公式块单独摘出来，不再并进散文。
+    """
+    if merge_on:
+        groups = build_paragraph_groups(blocks)
+    else:
+        groups = [[index] for index in range(len(blocks))]
+    return groups, build_paragraphs(blocks, groups, dehyphenate)
+
+
+def propagate_paragraph_roles(blocks, paragraphs) -> None:
+    """
+    把段落层判定的角色回写到原子块。
+
+    角色本身是段落级判断（要读完整的一段话才能定），但界面、角色统计、
+    背景信息面板都是按块查询的，所以结论要落回原子块。
+    """
+    for paragraph in paragraphs:
+        for index in paragraph.atom_indices:
+            blocks[index].role = paragraph.role
+            blocks[index].kind = paragraph.kind
+            blocks[index].level = paragraph.level
+
+
+def sync_paragraph_formulas(blocks, paragraphs, clusters) -> None:
+    """
+    把原子块的公式状态同步到段落视图（卡片构建、界面渲染读的是段落层）。
+
+    簇内段落的坐标会被**撑到整簇的外接矩形**：公式图渲染的就是这个矩形，
+    一个区域一张图。不撑开的话，簇里每块碎片都会按自己的小矩形各出一张图，
+    等于又回到了「公式被拆成好几张图」的老问题。
+    """
+    cluster_by_id = {cluster.cluster_id: cluster for cluster in clusters}
+    for paragraph in paragraphs:
+        head = blocks[paragraph.atom_indices[0]]
+        paragraph.is_formula = head.is_formula
+        paragraph.cluster_id = head.cluster_id
+        paragraph.formula_tier = head.formula_tier
+
+        cluster = cluster_by_id.get(paragraph.cluster_id)
+        if cluster is not None:
+            paragraph.x0, paragraph.y0, paragraph.x1, paragraph.y1 = cluster.rect
+            paragraph.page = cluster.page
 
 
 # ============================================================
@@ -546,20 +1098,374 @@ def mark_headings(blocks, body_size: float) -> None:
 
 
 # ============================================================
-# 七、总入口
+# 七、内容角色分类：把「正文」和「论文背景信息」分开
+# ============================================================
+
+def _repeat_key(text: str) -> str:
+    """跨页重复判断用的键：去掉数字、统一空白，避免页码差异导致认不出 running head"""
+    return re.sub(r"\d+", "#", re.sub(r"\s+", " ", text.strip().lower()))[:70]
+
+
+def classify_roles(blocks, page_heights: dict, total_pages: int, body_size: float) -> None:
+    """
+    给每个块标注内容角色（就地修改 role）。
+
+    判定顺序按「证据强度」从强到弱：
+      1. 已被识别成标题的 → 章节标题
+      2. 跨页反复出现的短文本 → 页眉页脚（最可靠的信号）
+      3. "Figure 3." / "Table 2:" 这种编号开头的 → 图注
+      4. 版权 / 许可 / 资助关键词 → 版权声明
+      5. References 标题之后的所有块，或条目模式 → 参考文献
+      6. 整块就是栏目名（Authors / Highlights / CCS Concepts…）→ 栏目名
+      7. 第一页：没有长正文 → 整页是封面页；有长正文 → 标题与摘要之间是作者单位
+      8. 剩下的 → 正文
+    """
+    # ---- 跨页重复的短文本 ----
+    counter = Counter(_repeat_key(b.text) for b in blocks if count_words(b.text) <= 20)
+    repeated = {key for key, times in counter.items() if times >= 3}
+
+    # ---- 参考文献的起始位置 ----
+    reference_start = None
+    for index, b in enumerate(blocks):
+        text = b.text.strip()
+        if count_words(text) <= 5 and _REFERENCES_HEADING_RE.match(text):
+            reference_start = index
+            break
+
+    for index, b in enumerate(blocks):
+        text = b.text.strip()
+        words = count_words(text)
+
+        # ① 参考文献区间：References 标题本身及其后的全部内容都算参考文献
+        if reference_start is not None and index >= reference_start:
+            b.role = ROLE_REFERENCE
+            continue
+
+        # ② 跨页反复出现的短文本 → 页眉页脚。
+        #    这条必须排在标题判定之前：期刊的 running head / 页脚有时会被当成标题，
+        #    例如 Cell Press 每页底部的 "3086 Current Biology 25, 3086–3091…"
+        if words <= 20 and _repeat_key(text) in repeated:
+            b.role = ROLE_HEADER_FOOTER
+            continue
+
+        # ③ 标题：但期刊刊头（Report / Current Biology Report）和
+        #    图内面板标签（"A B C D"）都不是论文章节
+        if b.kind == "heading":
+            if _MASTHEAD_RE.match(text) or _PANEL_LABEL_RE.match(text):
+                b.role = ROLE_LABEL
+            else:
+                b.role = ROLE_HEADING
+            continue
+
+        if _CAPTION_RE.match(text):
+            b.role = ROLE_CAPTION
+            continue
+
+        if _COPYRIGHT_RE.search(text):
+            b.role = ROLE_COPYRIGHT
+            continue
+
+        if _REFERENCE_ITEM_RE.match(text) and b.page > total_pages * 0.6:
+            b.role = ROLE_REFERENCE
+            continue
+
+        if _LABEL_RE.match(text):
+            b.role = ROLE_LABEL
+            continue
+
+        b.role = ROLE_BODY
+
+    # ---- 第一、二页的作者区（不少期刊在第 2 页重复标题和作者，如 Cell Press）----
+    document_title = ""
+    for page_no in (1, 2):
+        page_blocks = [b for b in blocks if b.page == page_no]
+        if not page_blocks:
+            continue
+
+        # 先找「像论文标题」的大字号块（字号明显大于正文）。要先做这一步：
+        # 封面页也要靠它记下论文标题，供后面识别「后续页重复的 running title」
+        title_block = None
+        for b in page_blocks:
+            if b.role != ROLE_HEADING or b.max_size < 1.3 * body_size:
+                continue
+            if title_block is None or b.order < title_block.order:
+                title_block = b
+        if page_no == 1 and title_block is not None:
+            document_title = _repeat_key(title_block.text)
+
+        long_body = [b for b in page_blocks
+                     if b.role in READING_ROLES and count_words(b.text) >= 60]
+
+        if not long_body:
+            # 这页没有任何长正文 → 是「封面页/前页」（Cell Press 那种
+            # Highlights + Authors + Correspondence + In Brief 版面），整页算背景
+            if page_no == 1:
+                for b in page_blocks:
+                    if b.role == ROLE_BODY:
+                        b.role = ROLE_FRONT_MATTER
+            continue
+
+        if title_block is None:
+            continue
+
+        first_long = min(long_body, key=lambda b: b.order)
+        for b in page_blocks:
+            if b.role != ROLE_BODY:
+                continue
+            if b.order <= title_block.order or b.order >= first_long.order:
+                continue
+            b.role = ROLE_AUTHOR        # 标题与摘要之间 = 作者、单位、联系方式
+
+    # 后续页面重复出现的论文标题（running title）不是章节，归入背景
+    if document_title:
+        for b in blocks:
+            if b.page >= 2 and b.role == ROLE_HEADING and _repeat_key(b.text) == document_title:
+                b.role = ROLE_LABEL
+
+
+# ============================================================
+# 八、阅读卡片：正文按章节聚合到目标词数
+# ============================================================
+
+def _join_pieces(pieces, dehyphenate: bool = True) -> str:
+    """把多个块的文本拼成一整段（处理行尾断词）"""
+    out = ""
+    for piece in pieces:
+        text = piece.text.strip()
+        if not text:
+            continue
+        if not out:
+            out = text
+        elif dehyphenate and out[-1] in "-‐\xad" and text[:1].islower():
+            out = out[:-1] + text
+        else:
+            out = f"{out} {text}"
+    return out
+
+
+def _text_entries(buffer):
+    """缓冲里的**文字**内容（公式除外——公式不参与翻译，也不计入词数）"""
+    return [paragraph for kind, paragraph in buffer if kind in ("heading", "text")]
+
+
+def _formula_payload(paragraph) -> dict:
+    """公式段落 → 渲染载荷（页码 + 区域矩形 + 线性文本兜底）"""
+    return {
+        "page": paragraph.page,
+        "rect": (paragraph.x0, paragraph.y0, paragraph.x1, paragraph.y1),
+        "text": paragraph.text,
+    }
+
+
+def _build_segments(buffer):
+    """
+    把缓冲里的段落转成卡片段落。
+
+    段落类型：
+        ("heading", 文本)   章节标题（卡片内加粗显示）
+        ("text",    文本)   正文
+        ("formula", {...})  公式——**渲染成图片**，因为二维公式没法用一行文字表达
+
+    公式段落的范围直接取「公式区域」（formula_finder 聚类得到的整簇外接矩形）：
+    一个区域只出一张图，区域内的其余块在 build_reading_cards 里已经跳过。
+    不再需要「按垂直间距把相邻公式粘起来」那种补丁式逻辑——聚类已经把
+    「同一处公式的上下游碎片」合并好了。
+    """
+    segments = []
+    for kind, paragraph in buffer:
+        text = paragraph.text.strip()
+        if not text:
+            continue
+        if kind == "formula":
+            segments.append(("formula", _formula_payload(paragraph)))
+        elif kind == "heading":
+            segments.append(("heading", text))
+        else:
+            segments.append(("text", text))
+    return segments
+
+
+def _append_to_card(card, buffer, dehyphenate: bool = True):
+    """把缓冲里的内容并进已有卡片（用于收掉章节末尾的零头，避免出现过短的尾卡）"""
+    card.segments.extend(_build_segments(buffer))
+    for kind, paragraph in buffer:
+        if kind == "heading" and paragraph.text.strip():
+            card.headings_inside.append(parse_section(paragraph.text.strip()))
+
+    card.text = _join_pieces([card] + _text_entries(buffer), dehyphenate)
+    card.page_end = max(card.page_end or card.page,
+                        max((p.page_end or p.page) for _, p in buffer))
+    card.y1 = max(card.y1, max(p.y1 for _, p in buffer))
+
+
+def _make_card(buffer, section_number: str, section_title: str, dehyphenate: bool = True):
+    """
+    把缓冲里的段落合成一张阅读卡片。
+
+    buffer 的元素是 (kind, Paragraph)：kind="heading" 章节标题、"text" 正文、
+    "formula" 公式区域。卡片的 text 是**纯文字**拼平后的全文（翻译、词数统计用），
+    公式的线性文本不入内——它已经由公式图片承载，混进来只会污染翻译与计数。
+    segments 保留内部结构，界面据此加粗标题、把公式渲染成图。
+    """
+    items = [paragraph for _, paragraph in buffer]
+    texts = _text_entries(buffer)
+    first = texts[0] if texts else items[0]
+    total_chars = sum(len(p.text) for p in texts) or 1
+    weighted_bold = sum(p.bold_ratio * len(p.text) for p in texts) / total_chars
+
+    segments = _build_segments(buffer)
+    headings_inside = [parse_section(p.text.strip()) for kind, p in buffer
+                       if kind == "heading" and p.text.strip()]
+
+    return Block(
+        page=min(p.page for p in items),
+        page_end=max((p.page_end or p.page) for p in items),
+        x0=min(p.x0 for p in items),
+        y0=min(p.y0 for p in items),
+        x1=max(p.x1 for p in items),
+        y1=max(p.y1 for p in items),
+        text=_join_pieces(texts, dehyphenate),
+        max_size=max(p.max_size for p in items),
+        bold_ratio=weighted_bold,
+        line_height=first.line_height,
+        column=first.column,
+        kind="body",
+        level=0,
+        role=ROLE_BODY,
+        section_number=section_number,
+        section_title=section_title,
+        segments=segments,
+        headings_inside=headings_inside,
+    )
+
+
+def build_reading_cards(paragraphs, target_words: int = 400, dehyphenate: bool = True):
+    """
+    把段落聚合成「阅读卡片」。
+
+    规则（对应用户要求：每张 100~300 词、语义连贯）：
+      · 只收 READING_ROLES 的段落（正文 + 图注；图注按用户要求视作正文）
+      · 正文按阅读顺序连续累加，凑到目标下限就收一张卡
+      · 章节标题**进卡片内部**、保持原位并加粗显示，不再单独占一张卡——
+        否则像 CHI 这种小节特别多的论文，每张卡都只有一两百词，凑不到目标长度
+      · 卡片不跨「非正文」区域（页眉页脚、参考文献等会被跳过）
+      · 公式区域整块出图（一个区域只出一张图），**不计入词数、不进翻译**
+      · 末尾零头能并进上一张就并；单个超长段落先按句子边界切开
+    """
+    # 「目标词数」是攒到多少就收一张卡的阈值（默认 200），
+    # 实际落点区间是它的 0.5~1.5 倍（默认 100~300 词）。
+    flush_at = max(60, target_words)
+    target_min = max(40, round(target_words * 0.5))    # 低于这个值的尾卡会并进上一张
+    target_max = round(target_words * 1.5)             # 单块超过这个值按句子边界切开
+    slack = round(target_words * 0.25)                 # 尾卡并入后允许超出的余量
+
+    # 先给每个段落标上所属章节：标题之后的内容都属于该标题开启的章节
+    current_number, current_title = "", ""
+    for paragraph in paragraphs:
+        if paragraph.role == ROLE_HEADING:
+            current_number, current_title = parse_section(paragraph.text)
+        paragraph.section_number = current_number
+        paragraph.section_title = current_title
+
+    # 公式区域只出一张图：簇内第一个成员负责出图，同簇其余成员直接跳过。
+    # （不这样做的话，一个跨卡片边界的区域会在两张卡里各渲染一次。）
+    cluster_head = {}
+    for paragraph in paragraphs:
+        if paragraph.cluster_id >= 0:
+            cluster_head.setdefault(paragraph.cluster_id, paragraph.atom_indices[0])
+
+    cards = []
+    buffer = []                     # [(kind, Paragraph)]，kind = "heading"/"text"/"formula"
+    buffer_section = ("", "")
+
+    def buffered_words() -> int:
+        return sum(count_words(p.text) for kind, p in buffer if kind == "text")
+
+    def close_buffer():
+        """收卡。若末尾只是零头（不足下限），尽量并进上一张，避免出现过短的尾卡。"""
+        nonlocal buffer
+        if not buffer:
+            return
+
+        words = buffered_words()
+        previous = cards[-1] if cards else None
+        can_merge = (
+            previous is not None
+            and words < target_min
+            and count_words(previous.text) + words <= target_max + slack
+        )
+
+        if can_merge:
+            _append_to_card(previous, buffer, dehyphenate)
+        else:
+            cards.append(_make_card(buffer, buffer_section[0], buffer_section[1], dehyphenate))
+
+        buffer = []
+
+    for paragraph in paragraphs:
+        # 同一公式区域的非头部成员：图已经出过，这里直接跳过
+        if paragraph.cluster_id >= 0 \
+                and cluster_head.get(paragraph.cluster_id) != paragraph.atom_indices[0]:
+            continue
+
+        if paragraph.role == ROLE_HEADING:
+            # 章节标题进卡片内部（保持原位、加粗显示），不再单独占一张卡
+            if not buffer:
+                buffer_section = (paragraph.section_number, paragraph.section_title)
+            buffer.append(("heading", paragraph))
+            continue
+
+        if paragraph.role not in READING_ROLES:
+            continue                          # 非正文：不进卡片流，它们去背景信息面板
+
+        if not buffer:
+            buffer_section = (paragraph.section_number, paragraph.section_title)
+
+        if paragraph.is_formula:
+            # 公式区域：整簇出图，不切分；词数只为「卡片多长」服务，不参与翻译
+            words = count_words(paragraph.text)
+            if buffer and buffered_words() >= target_min \
+                    and buffered_words() + words > target_max:
+                close_buffer()
+            buffer.append(("formula", paragraph))
+        else:
+            for piece in split_long_block(paragraph, max_words=round(target_words),
+                                          hard_limit=target_max):
+                piece_words = count_words(piece.text)
+                # 已经够了下限、再加这一段就会超上限 → 先收卡，保证卡片不超上限
+                if buffer and buffered_words() >= target_min \
+                        and buffered_words() + piece_words > target_max:
+                    close_buffer()
+                buffer.append(("text", piece))
+
+        # 攒到目标词数就收卡；但不允许卡片以标题结尾（否则标题会悬在末尾没有正文）
+        if buffered_words() >= flush_at:
+            close_buffer()
+
+    close_buffer()
+    return cards
+
+
+# ============================================================
+# 九、总入口
 # ============================================================
 
 def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
-              max_words: int = 200) -> dict:
+              target_words: int = 400) -> dict:
     """
-    PDF 字节流 → 卡片数据。
+    PDF 字节流 → 阅读数据。
 
     返回字典：
-        blocks      : list[Block]  按阅读顺序排好的卡片
-        pages       : list[dict]   每页的排版检测结果（诊断用）
-        body_size   : float        估算出的正文字号
-        total_chars : int          全文可提取字符数（用来识别扫描版）
-        elapsed     : float        解析耗时（秒）
+        cards            : list[Block]  阅读卡片（正文按章节聚合）——界面主体读它
+        blocks           : list[Block]  原子块（带 role/section/formula_tier/cluster_id）
+        paragraphs       : list[Paragraph] 派生段落（背景信息、显示全部内容读它）
+        groups           : list[list[int]] 段落分组（原子块下标），纯派生、可解释
+        formula_clusters : list[FormulaCluster] 公式区域（含成员块下标，便于核对）
+        roles            : dict         各角色的块数统计（正文/页眉页脚/作者单位/参考文献…）
+        pages            : list[dict]   每页的排版检测结果（诊断用）
+        body_size        : float        估算出的正文字号
+        total_chars      : int          全文可提取字符数（用来识别扫描版）
+        elapsed          : float        解析耗时（秒）
     """
     start = time.time()
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
@@ -569,11 +1475,14 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
             raise ValueError("这个 PDF 有密码保护，无法解析。请先在阅读器里去掉密码再试。")
 
         pages_meta, blocks, total_chars = [], [], 0
+        page_heights, page_sizes = {}, {}
 
         for i, page in enumerate(doc):
             page_no = i + 1
             chars = len(page.get_text().strip())
             total_chars += chars
+            page_heights[page_no] = page.rect.height
+            page_sizes[page_no] = (page.rect.width, page.rect.height)
 
             raw_blocks = extract_page_blocks(page, page_no, dehyphenate)
             gutter = detect_gutter(raw_blocks, page.rect.width)
@@ -589,19 +1498,59 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
                 "文字数": chars,
             })
 
-        if merge_on:
-            blocks = merge_paragraphs(blocks)
-
-        blocks = [piece for b in blocks for piece in split_long_block(b, max_words)]
-
+        # ---- 一、原子层：只做字符级修复与标题识别，绝不改写原子块结构 ----
         body_size = estimate_body_size(blocks)
         mark_headings(blocks, body_size)
 
         for idx, b in enumerate(blocks, 1):
             b.order = idx
 
+        # ---- 二、段落层（第一次）：纯派生，供角色分类读「一整段话」----
+        groups, paragraphs = build_paragraph_layer(blocks, merge_on, dehyphenate)
+        for paragraph in paragraphs:
+            paragraph.text = repair_stats_symbols(paragraph.text)
+
+        # ---- 三、内容角色：段落级判断（要读完整一段才能定），结论回写到原子块 ----
+        # 注意：order 必须先于 classify_roles 赋值——分类里要用它比较「在标题/摘要之前还是之后」
+        classify_roles(paragraphs, page_heights, doc.page_count, body_size)
+        propagate_paragraph_roles(blocks, paragraphs)
+
+        # ---- 四、公式：三级标记 → 区域聚类 → 确认的公式移出文字流 ----
+        # 顺序很重要：角色分类在前（阈值是按段落调的），公式判定与聚类在后。
+        # 公式判定读的是**原子层**，聚类也按原子块坐标做，这样碎片不会被段落吞掉。
+        margins = column_margins(blocks)
+        mark_formula_tiers(blocks, margins)
+        clusters = formula_finder.find_formula_clusters(blocks, page_sizes, margins)
+        apply_clusters(blocks, clusters)
+        # 一个成员都没标上的簇（判定出来的块全在背景信息里）不呈现，避免出现空区域
+        clusters = [cluster for cluster in clusters
+                    if any(blocks[i].cluster_id == cluster.cluster_id
+                           for i in cluster.atom_indices)]
+
+        # ---- 五、段落层（第二次）：把公式块从段落里摘出来 ----
+        # 必须重建一次：第一次分组时还不知道谁是公式，公式块会被当成段落续写并进去，
+        # 于是它的文字就永远留在了散文里（第九页的
+        # "…The average velocity over Nframes is k ∑ k=k−N+1" 正是这么来的）。
+        # 角色已经写在原子块上，重建视图时会自动继承。
+        groups, paragraphs = build_paragraph_layer(blocks, merge_on, dehyphenate)
+        for paragraph in paragraphs:
+            paragraph.text = repair_stats_symbols(paragraph.text)
+        sync_paragraph_formulas(blocks, paragraphs, clusters)
+
+        # ---- 五、卡片：正文按章节聚合，公式区域整块出图 ----
+        cards = build_reading_cards(paragraphs, target_words, dehyphenate)
+
+        for idx, card in enumerate(cards, 1):
+            card.card_index = idx
+            card.order = idx          # 卡片自己的编号（图片关联等按卡片记账）
+
         return {
-            "blocks": blocks,
+            "cards": cards,
+            "blocks": blocks,               # 原子块：元数据、诊断、图片关联用
+            "paragraphs": paragraphs,       # 派生段落：背景信息、显示全部内容用
+            "groups": groups,               # 段落分组（原子块下标），可解释、可回退
+            "formula_clusters": clusters,   # 公式区域：诊断面板据此核对「合了哪几块」
+            "roles": dict(Counter(b.role for b in blocks)),
             "pages": pages_meta,
             "body_size": body_size,
             "total_chars": total_chars,

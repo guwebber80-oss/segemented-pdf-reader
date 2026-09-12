@@ -158,8 +158,15 @@ def _request_with_retry(send, timeout: int, retries: int, log=None):
 # ============================================================
 # 三、各后端的具体实现
 # ============================================================
+# 统一按「多段文本」处理。为什么要支持一次多段：
+# 中文视图需要**按段落分别翻译**（这样公式段才能保持图片、不参与翻译），
+# 如果每段发一次请求，一张 200 词的卡片要等十几秒。
+# DeepL 与 Google 都支持一次请求带多段文本，返回顺序与传入顺序一致。
 
-def _translate_deepl(text: str, target: str, config: dict, timeout: int, retries: int, log):
+_BATCH_SIZE = 25          # 一次请求最多带多少段（DeepL 上限 50，这里留足余量）
+
+
+def _translate_deepl(texts, target: str, config: dict, timeout: int, retries: int, log):
     key = config["deepl"]
     # 免费版 Key 以 ":fx" 结尾，接口域名不一样；这里自动判断
     host = "https://api-free.deepl.com" if key.endswith(":fx") else "https://api.deepl.com"
@@ -168,57 +175,62 @@ def _translate_deepl(text: str, target: str, config: dict, timeout: int, retries
         return requests.post(
             f"{host}/v2/translate",
             headers={"Authorization": f"DeepL-Auth-Key {key}"},
-            data={"text": text, "target_lang": _TARGET_MAP["deepl"][target]},
+            # 传列表时 requests 会编码成 text=a&text=b，DeepL 按顺序返回
+            data={"text": list(texts), "target_lang": _TARGET_MAP["deepl"][target]},
             timeout=t,
         )
 
-    response = _request_with_retry(send, timeout, retries, log)
-    payload = response.json()
-    return payload["translations"][0]["text"]
+    payload = _request_with_retry(send, timeout, retries, log).json()
+    return [item["text"] for item in payload["translations"]]
 
 
-def _translate_openai(text: str, target: str, config: dict, timeout: int, retries: int, log):
+def _translate_openai(texts, target: str, config: dict, timeout: int, retries: int, log):
+    """OpenAI 的 chat 接口没有批量翻译参数，只能逐段调用（其它后端仍是一次请求）"""
     key = config["openai"]
     language = _TARGET_MAP["openai"][target]
+    results = []
 
-    def send(t):
-        return requests.post(
-            f"{config['openai_base']}/chat/completions",
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json={
-                "model": config["openai_model"],
-                "temperature": 0,          # 翻译要稳定，不要发挥
-                "messages": [
-                    {"role": "system",
-                     "content": f"You are a professional academic translator. "
-                                f"Translate the user's text into {language}. "
-                                f"Output ONLY the translation, no explanation, keep technical terms accurate."},
-                    {"role": "user", "content": text},
-                ],
-            },
-            timeout=t,
-        )
+    for text in texts:
+        def send(t, text=text):
+            return requests.post(
+                f"{config['openai_base']}/chat/completions",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={
+                    "model": config["openai_model"],
+                    "temperature": 0,          # 翻译要稳定，不要发挥
+                    "messages": [
+                        {"role": "system",
+                         "content": f"You are a professional academic translator. "
+                                    f"Translate the user's text into {language}. "
+                                    f"Output ONLY the translation, no explanation, "
+                                    f"keep technical terms accurate."},
+                        {"role": "user", "content": text},
+                    ],
+                },
+                timeout=t,
+            )
 
-    response = _request_with_retry(send, timeout, retries, log)
-    return response.json()["choices"][0]["message"]["content"].strip()
+        response = _request_with_retry(send, timeout, retries, log)
+        results.append(response.json()["choices"][0]["message"]["content"].strip())
+    return results
 
 
-def _translate_google(text: str, target: str, config: dict, timeout: int, retries: int, log):
+def _translate_google(texts, target: str, config: dict, timeout: int, retries: int, log):
+    import html
+
     key = config["google"]
 
     def send(t):
         return requests.post(
             "https://translation.googleapis.com/language/translate/v2",
             params={"key": key},
-            data={"q": text, "target": _TARGET_MAP["google"][target], "format": "text"},
+            data={"q": list(texts), "target": _TARGET_MAP["google"][target], "format": "text"},
             timeout=t,
         )
 
-    response = _request_with_retry(send, timeout, retries, log)
-    translated = response.json()["data"]["translations"][0]["translatedText"]
+    payload = _request_with_retry(send, timeout, retries, log).json()
     # Google 会把引号等符号转义成 HTML 实体（&quot; 之类），这里还原
-    import html
-    return html.unescape(translated)
+    return [html.unescape(item["translatedText"]) for item in payload["data"]["translations"]]
 
 
 _BACKENDS = {
@@ -232,18 +244,18 @@ _BACKENDS = {
 # 四、对外接口
 # ============================================================
 
-def translate(text: str, target: str = "zh", backend: str = None,
-              timeout: int = DEFAULT_TIMEOUT, retries: int = MAX_RETRIES, log=None) -> str:
+def translate_many(texts, target: str = "zh", backend: str = None,
+                   timeout: int = DEFAULT_TIMEOUT, retries: int = MAX_RETRIES, log=None):
     """
-    翻译一段文本。失败抛 TranslationError（消息可直接展示给用户）。
+    一次翻译多段文本，返回顺序与输入完全一致。
 
-    text    原文；空字符串直接返回空字符串（不浪费额度）
-    target  "zh" 或 "en"
-    backend "deepl" / "openai" / "google"；不传则用 .env 里的 TRANSLATOR_BACKEND
+    用途：中文视图要**按段落分别翻译**（公式段保持图片不翻译），
+    但 DeepL / Google 支持一次请求带多段文本，所以仍然只发一次 HTTP 请求。
+    空白段直接返回空字符串，不浪费额度。
     """
-    text = (text or "").strip()
-    if not text:
-        return ""
+    texts = list(texts)
+    if not texts:
+        return []
 
     if target not in _TARGET_MAP["deepl"]:
         raise TranslationError(f"不支持的目标语言：{target}")
@@ -261,7 +273,39 @@ def translate(text: str, target: str = "zh", backend: str = None,
             f"请在项目根目录的 .env 里填写对应的 Key。"
         )
 
-    return _BACKENDS[backend](text, target, config, timeout, retries, log)
+    results = ["" for _ in texts]
+    pending = [(index, text) for index, text in enumerate(texts) if (text or "").strip()]
+
+    for start in range(0, len(pending), _BATCH_SIZE):
+        chunk = pending[start:start + _BATCH_SIZE]
+        translated = _BACKENDS[backend](
+            [text for _, text in chunk], target, config, timeout, retries, log)
+
+        if len(translated) != len(chunk):
+            # 段数对不上就不能瞎对应，直接报错（宁可失败也不要错位）
+            raise TranslationError(
+                f"翻译服务返回的段数与请求不一致（请求 {len(chunk)} 段、返回 {len(translated)} 段）"
+            )
+        for (index, _), value in zip(chunk, translated):
+            results[index] = value
+
+    return results
+
+
+def translate(text: str, target: str = "zh", backend: str = None,
+              timeout: int = DEFAULT_TIMEOUT, retries: int = MAX_RETRIES, log=None) -> str:
+    """
+    翻译一段文本。失败抛 TranslationError（消息可直接展示给用户）。
+
+    text    原文；空字符串直接返回空字符串（不浪费额度）
+    target  "zh" 或 "en"
+    backend "deepl" / "openai" / "google"；不传则用 .env 里的 TRANSLATOR_BACKEND
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    return translate_many([text], target=target, backend=backend,
+                          timeout=timeout, retries=retries, log=log)[0]
 
 
 def probe_backend(backend: str, target: str = "zh", **kwargs) -> str:

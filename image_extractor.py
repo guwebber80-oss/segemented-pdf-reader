@@ -194,6 +194,29 @@ def _rect_gap(a: tuple, b: tuple) -> float:
     return math.hypot(dx, dy)
 
 
+def render_region_image(pdf_bytes: bytes, page_no: int, rect, dpi: int = 200) -> bytes:
+    """
+    把页面上的一个矩形区域渲染成 PNG。
+
+    用途：**公式的呈现**。二维公式（分式、积分、矩阵）在 PDF 里只是
+    「带坐标的文字」（实测没有 MathML/LaTeX 源码可提取），压成一行必然失真，
+    所以直接把原区域截成图片插进卡片——视觉 100% 保真。
+    代价是公式图不可选中、不可翻译；线性文本仍保留在「显示全部内容」和译文里。
+
+    dpi 取 200：公式通常只有几十 pt 宽，显示时按原始像素尺寸呈现，
+    200dpi 能保证小字号公式也清晰可读。
+    """
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        page = doc[page_no - 1]
+        clip = pymupdf.Rect(*rect)
+        # 稍微外扩，避免把公式的上下标或分数线边缘切掉
+        clip = pymupdf.Rect(clip.x0 - 2, clip.y0 - 3, clip.x1 + 2, clip.y1 + 3)
+        return page.get_pixmap(clip=clip, dpi=dpi).tobytes("png")
+    finally:
+        doc.close()
+
+
 def associate_with_cards(images, blocks) -> dict:
     """
     给每张图片找「同页、位置最近」的文本卡片，就地写回 card_order / gap。
