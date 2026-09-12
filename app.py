@@ -22,6 +22,7 @@ from image_extractor import (
     extract_images,
     render_full_image,
 )
+from metadata import extract_metadata
 from pdf_parser import count_words, escape_markdown, parse_pdf
 from translator import (
     BACKEND_LABELS,
@@ -135,7 +136,7 @@ def get_full_image(pdf_bytes: bytes, image_item):
 
 
 st.title("📚 科研文献 PDF 智能阅读器")
-st.caption("阶段 2：卡片式阅读 + 中英文一键切换（译文按需请求，带缓存）")
+st.caption("阶段 4.1：卡片式阅读 + 中英一键切换 + 图片浏览 + 元数据提取（标题 / DOI / 摘要）")
 
 # ============================================================
 # 第 2 部分：侧边栏
@@ -323,6 +324,85 @@ with st.sidebar:
                         st.caption(f"{img.pixel_w}×{img.pixel_h}px · {assoc_text}")
                         if st.button("🔍 放大", key=f"zoom_{img.key}", width="stretch"):
                             st.session_state["selected_image"] = img.key
+
+# ============================================================
+# 第 4.6 部分：文献元数据（标题 / DOI / 摘要）
+# ============================================================
+meta_key = f"{uploaded_file.name}|{uploaded_file.size}"
+
+if st.session_state.get("meta_key") != meta_key:
+    with st.spinner("正在提取标题 / DOI / 摘要…"):
+        try:
+            st.session_state["metadata"] = extract_metadata(pdf_bytes, blocks)
+            st.session_state["meta_error"] = None
+        except Exception as exc:
+            # 元数据提取失败不影响阅读，降级成空字段让用户手填
+            from metadata import Metadata
+            st.session_state["metadata"] = Metadata()
+            st.session_state["meta_error"] = f"{type(exc).__name__}: {exc}"
+    # 换了文件：清掉上一个文件留下的编辑内容，让输入框重新取自动提取值
+    for key in ("in_title", "in_doi", "in_abstract"):
+        st.session_state.pop(key, None)
+    st.session_state["meta_key"] = meta_key
+
+metadata = st.session_state["metadata"]
+
+
+def metadata_input(label: str, widget_key: str, meta_field, is_long: bool = False,
+                   height: int = 170):
+    """
+    一个可编辑的元数据字段 + 它下方的来源说明。
+
+    输入框的值存在 session_state 里，所以用户的修改会跨重跑保留下来，
+    不会被 Streamlit 的「每次交互重跑整个脚本」冲掉。
+    """
+    if widget_key not in st.session_state:
+        st.session_state[widget_key] = meta_field.value
+
+    if meta_field.found:
+        if is_long:
+            st.text_area(label, key=widget_key, height=height)
+        else:
+            st.text_input(label, key=widget_key)
+        caption = f"来源：{meta_field.source}"
+        if meta_field.note:
+            caption += f"　⚠️ {meta_field.note}"
+        st.caption(caption)
+    else:
+        if is_long:
+            st.text_area(f"{label}（未找到，请手动输入）", key=widget_key, height=height)
+        else:
+            st.text_input(f"{label}（未找到，请手动输入）", key=widget_key)
+        st.caption(f"⚠️ {meta_field.note or '自动提取失败，请手动填写'}")
+
+
+st.subheader("📋 文献元数据")
+
+head_left, head_right = st.columns([4, 1])
+with head_left:
+    st.caption(
+        "自动提取只是**候选值**。科研场景下准确性优先于自动化——"
+        "请核对后直接修改，改动立即生效。"
+    )
+with head_right:
+    if st.button("↺ 用自动提取结果覆盖", help="把手动修改过的内容还原成程序提取的值"):
+        st.session_state["in_title"] = metadata.title.value
+        st.session_state["in_doi"] = metadata.doi.value
+        st.session_state["in_abstract"] = metadata.abstract.value
+        st.rerun()
+
+if st.session_state.get("meta_error"):
+    st.error("元数据提取失败：" + st.session_state["meta_error"])
+
+col_title, col_doi = st.columns([2, 1])
+with col_title:
+    metadata_input("标题", "in_title", metadata.title)
+with col_doi:
+    metadata_input("DOI", "in_doi", metadata.doi)
+
+metadata_input("摘要", "in_abstract", metadata.abstract, is_long=True)
+
+st.divider()
 
 # ============================================================
 # 第 5 部分：解析概览
@@ -519,6 +599,18 @@ with st.expander("🔍 解析诊断（验证阅读顺序、定位双栏错位）
     if image_result["skipped"]:
         st.markdown(f"**⑤ 被跳过的图片（{len(image_result['skipped'])} 张）**")
         st.dataframe(image_result["skipped"], hide_index=True)
+
+    st.markdown("**⑥ 元数据提取详情**（自动提取的原始值与来源，方便对照你在上面改过的内容）")
+    st.dataframe([{
+        "字段": name,
+        "来源": meta_field.source,
+        "自动提取值": (meta_field.value[:70] + "…") if len(meta_field.value) > 70 else meta_field.value,
+        "备注": meta_field.note,
+    } for name, meta_field in [("标题", metadata.title),
+                               ("DOI", metadata.doi),
+                               ("摘要", metadata.abstract)]], hide_index=True)
+    if metadata.title.alternatives:
+        st.caption(f"标题备选（来自 PDF 内嵌元数据，可自行取舍）：{metadata.title.alternatives}")
 
 # ============================================================
 # 第 8 部分：卡片全部渲染完之后，把翻译计数填进侧边栏的占位符
