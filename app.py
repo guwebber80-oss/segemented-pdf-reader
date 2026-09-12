@@ -351,12 +351,12 @@ with st.sidebar:
                             st.session_state["selected_image"] = img.key
 
 # ============================================================
-# 第 4.6 部分：文献元数据（标题 / DOI / 摘要）
+# 第 4.6 部分：文献元数据（标题 / DOI / 摘要 / 作者 / 单位 / 通讯 / 附件链接）
 # ============================================================
 meta_key = f"{uploaded_file.name}|{uploaded_file.size}"
 
 if st.session_state.get("meta_key") != meta_key:
-    with st.spinner("正在提取标题 / DOI / 摘要…"):
+    with st.spinner("正在提取文献元数据（标题 / DOI / 摘要 / 作者 / 单位 / 附件链接）…"):
         try:
             st.session_state["metadata"] = extract_metadata(pdf_bytes, blocks)
             st.session_state["meta_error"] = None
@@ -366,7 +366,9 @@ if st.session_state.get("meta_key") != meta_key:
             st.session_state["metadata"] = Metadata()
             st.session_state["meta_error"] = f"{type(exc).__name__}: {exc}"
     # 换了文件：清掉上一个文件留下的编辑内容，让输入框重新取自动提取值
-    for key in ("in_title", "in_doi", "in_abstract"):
+    for key in ("in_title", "in_doi", "in_abstract", "in_authors", "in_first_author",
+                "in_corresponding", "in_corresponding_email", "in_affiliations",
+                "in_supplementary", "in_author_emails"):
         st.session_state.pop(key, None)
     st.session_state["meta_key"] = meta_key
 
@@ -414,6 +416,13 @@ with head_right:
         st.session_state["in_title"] = metadata.title.value
         st.session_state["in_doi"] = metadata.doi.value
         st.session_state["in_abstract"] = metadata.abstract.value
+        st.session_state["in_authors"] = metadata.authors.value
+        st.session_state["in_first_author"] = metadata.first_author.value
+        st.session_state["in_corresponding"] = metadata.corresponding_author.value
+        st.session_state["in_corresponding_email"] = metadata.corresponding_email.value
+        st.session_state["in_affiliations"] = metadata.affiliations.value
+        st.session_state["in_supplementary"] = metadata.supplementary_links.value
+        st.session_state["in_author_emails"] = metadata.author_emails.value
         st.rerun()
 
 if st.session_state.get("meta_error"):
@@ -426,6 +435,38 @@ with col_doi:
     metadata_input("DOI", "in_doi", metadata.doi)
 
 metadata_input("摘要", "in_abstract", metadata.abstract, is_long=True)
+
+# ---- 阶段 4.2：作者 / 单位 / 通讯作者 / 附件链接 ----
+st.markdown("##### 👥 作者与单位")
+
+col_first, col_corr, col_mail = st.columns([1, 1, 1])
+with col_first:
+    metadata_input("第一作者", "in_first_author", metadata.first_author)
+with col_corr:
+    metadata_input("通讯作者", "in_corresponding", metadata.corresponding_author)
+with col_mail:
+    metadata_input("通讯邮箱", "in_corresponding_email", metadata.corresponding_email)
+
+metadata_input("作者列表（每行一位，保持原文顺序）", "in_authors", metadata.authors,
+               is_long=True, height=130)
+metadata_input("作者单位（每行一个，保留原文编号）", "in_affiliations", metadata.affiliations,
+               is_long=True, height=130)
+
+with st.expander("📧 作者邮箱（逐作者列出，ACM 等排版常见）", expanded=False):
+    metadata_input("作者邮箱", "in_author_emails", metadata.author_emails,
+                   is_long=True, height=110)
+
+st.markdown("##### 📎 补充材料 / 数据链接")
+metadata_input("附件链接（每行一个 URL）", "in_supplementary",
+               metadata.supplementary_links, is_long=True, height=90)
+if metadata.supplementary_items:
+    for item in metadata.supplementary_items:
+        st.markdown(f"- **{item['类型']}**（第 {item['页码']} 页）："
+                    f"[{item['链接']}]({item['链接']})　"
+                    f"<span style='color:#888'>依据：{escape_markdown(item['上下文'][:70])}</span>",
+                    unsafe_allow_html=True)
+    st.caption("上面的分类是按链接域名与上下文关键词判的，可能有偏差；"
+               "链接本身都是从 PDF 的链接注释或正文里抓出来的，可以直接点开核对。")
 
 st.divider()
 
@@ -859,9 +900,19 @@ with st.expander("🔍 解析诊断（验证阅读顺序、定位双栏错位）
         "备注": meta_field.note,
     } for name, meta_field in [("标题", metadata.title),
                                ("DOI", metadata.doi),
-                               ("摘要", metadata.abstract)]], hide_index=True)
+                               ("摘要", metadata.abstract),
+                               ("作者列表", metadata.authors),
+                               ("第一作者", metadata.first_author),
+                               ("通讯作者", metadata.corresponding_author),
+                               ("通讯邮箱", metadata.corresponding_email),
+                               ("作者单位", metadata.affiliations),
+                               ("作者邮箱", metadata.author_emails),
+                               ("附件链接", metadata.supplementary_links)]], hide_index=True)
     if metadata.title.alternatives:
         st.caption(f"标题备选（来自 PDF 内嵌元数据，可自行取舍）：{metadata.title.alternatives}")
+    if metadata.supplementary_items:
+        st.markdown("**⑥-2 附件链接的证据**（页码 + 抓取依据）")
+        st.dataframe(metadata.supplementary_items, hide_index=True)
 
     st.markdown(f"**⑦ 公式区域明细（{len(clusters)} 个）**"
                 "——每个区域渲染成一张图，右边列出被合进来的块，方便核对有没有合错")

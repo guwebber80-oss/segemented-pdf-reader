@@ -1120,9 +1120,16 @@ def classify_roles(blocks, page_heights: dict, total_pages: int, body_size: floa
       7. 第一页：没有长正文 → 整页是封面页；有长正文 → 标题与摘要之间是作者单位
       8. 剩下的 → 正文
     """
-    # ---- 跨页重复的短文本 ----
-    counter = Counter(_repeat_key(b.text) for b in blocks if count_words(b.text) <= 20)
-    repeated = {key for key, times in counter.items() if times >= 3}
+    # ---- 跨页重复的短文本（页眉页脚）----
+    # 关键：必须要求「出现在 ≥3 个**不同页**」。
+    # 只看出现次数会误伤作者区——ACM 那篇有 3 位作者共用同一行单位文字
+    # （"School of Computer Science Queensland University of Technology" 在同一页出现 3 次），
+    # 按次数判定就会把单位行标成页眉页脚，阶段 4.2 就取不到单位了。
+    pages_by_key = {}
+    for block in blocks:
+        if count_words(block.text) <= 20:
+            pages_by_key.setdefault(_repeat_key(block.text), set()).add(block.page)
+    repeated = {key for key, pages in pages_by_key.items() if len(pages) >= 3}
 
     # ---- 参考文献的起始位置 ----
     reference_start = None
