@@ -323,6 +323,15 @@ docker run --rm --init --ulimit core=0 -p 8070:8070 grobid/grobid:0.9.1-crf
 **验证**：另开一个窗口 `curl.exe http://localhost:8070/api/isalive` 返回 `true`。
 **停止**：在那个窗口按 `Ctrl+C`（容器带 `--rm`，停掉自动清理）。
 
+**后台运行（可选，不开日志窗口）**：把 `--rm --init` 换成 `-d --rm --name grobid --init`：
+
+```powershell
+docker run -d --rm --name grobid --init --ulimit core=0 -p 8070:8070 grobid/grobid:0.9.1-crf
+docker ps                       # 看是否在跑
+docker logs -f grobid           # 看日志（Ctrl+C 退出查看，不影响容器）
+docker stop grobid              # 停止（--rm 会自动清理容器）
+```
+
 2. **上传 PDF**，在「📋 文献元数据」下方会出现 **「🔍 GROBID 交叉校验」** 面板：
    - 服务在 → 自动跑一次校验（约 1~3 秒，结果缓存在会话里），显示逐字段对比表；
    - 有差异的字段带「**一键采信**」按钮：单值字段直接采用 GROBID 的值；
