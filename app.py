@@ -14,6 +14,8 @@ r"""
 翻译需要 .env 里有 API Key（复制 .env.example 为 .env 后填写），见 README「阶段 2 说明」。
 """
 
+import os
+
 import streamlit as st
 
 from image_extractor import (
@@ -24,6 +26,8 @@ from image_extractor import (
     render_region_image,
 )
 from metadata import extract_metadata
+import metadata_compare
+import grobid_client
 from pdf_parser import (
     ROLE_AUTHOR,
     ROLE_COPYRIGHT,
@@ -467,6 +471,130 @@ if metadata.supplementary_items:
                     unsafe_allow_html=True)
     st.caption("上面的分类是按链接域名与上下文关键词判的，可能有偏差；"
                "链接本身都是从 PDF 的链接注释或正文里抓出来的，可以直接点开核对。")
+
+# ============================================================
+# 第 4.7 部分：GROBID 交叉校验（阶段 4.3）
+# ============================================================
+# 思路：本地规则（版面启发式）与 GROBID（CRF 模型）各抽一遍，逐字段对照。
+# 两边一致 → 可信度大增；不一致 → 并排显示，由用户决定采信谁（一键写回上面的输入框）。
+# GROBID 不提供通讯作者与附件链接，界面上如实标注，不显示成「不一致」误导用户。
+GROBID_BASE_URL = os.environ.get("GROBID_URL", grobid_client.DEFAULT_BASE_URL)
+
+
+def grobid_status(force: bool = False):
+    """探测 GROBID 服务（结果缓存在会话里，避免每次交互都等网络超时）"""
+    if force or "grobid_alive" not in st.session_state:
+        alive, message = grobid_client.is_alive(GROBID_BASE_URL)
+        st.session_state["grobid_alive"] = alive
+        st.session_state["grobid_message"] = message
+        st.session_state["grobid_version"] = grobid_client.server_version(GROBID_BASE_URL) \
+            if alive else ""
+    return st.session_state["grobid_alive"], st.session_state["grobid_message"]
+
+
+st.markdown("##### 🔍 GROBID 交叉校验")
+st.caption(
+    "GROBID 是专门抽取论文头部信息的外部模型，这里把它当作**第二意见**："
+    "两边结果一致说明可信度高；不一致时并排显示，你可以逐字段决定采信谁。"
+    "它**不提供**通讯作者与附件链接（界面上会如实标注）。"
+)
+
+grobid_alive, grobid_message = grobid_status()
+
+if not grobid_alive:
+    st.info(
+        f"{grobid_message}\n\n"
+        "需要时用这条命令启动（保持窗口开着即可）：\n"
+        "```\ndocker run --rm --init --ulimit core=0 -p 8070:8070 grobid/grobid:0.9.1-crf\n```\n"
+        "没启动也**不影响任何阅读功能**——上面的字段仍然是本地规则的结果。"
+    )
+else:
+    if st.session_state.get("grobid_key") != meta_key:
+        # 换文件：清掉上一个文件的校验结果，并重新采一次（服务已在则自动跑）
+        for key in ("grobid_result", "grobid_error", "grobid_error_detail"):
+            st.session_state.pop(key, None)
+        st.session_state["grobid_key"] = meta_key
+
+    col_run, col_ver = st.columns([3, 2])
+    with col_run:
+        run_clicked = st.button("🔍 运行 GROBID 校验", key="grobid_run")
+    with col_ver:
+        st.caption(f"服务：{grobid_message}"
+                   + (f" · 版本 {st.session_state.get('grobid_version', '')[:32]}"
+                      if st.session_state.get("grobid_version") else ""))
+
+    if (run_clicked or "grobid_result" not in st.session_state) \
+            and not st.session_state.get("grobid_error_detail"):
+        with st.spinner("正在调用 GROBID 抽取头部信息（首次约 5~10 秒）…"):
+            try:
+                st.session_state["grobid_result"] = grobid_client.header_from_pdf(
+                    pdf_bytes, base_url=GROBID_BASE_URL, filename=uploaded_file.name)
+                st.session_state["grobid_error"] = None
+            except grobid_client.GrobidError as exc:
+                st.session_state["grobid_result"] = None
+                st.session_state["grobid_error"] = str(exc)
+            except Exception as exc:                     # 兜底：任何异常都不能打断阅读
+                st.session_state["grobid_result"] = None
+                st.session_state["grobid_error"] = f"{type(exc).__name__}: {exc}"
+
+    grobid_result = st.session_state.get("grobid_result")
+
+    if st.session_state.get("grobid_error"):
+        st.warning("GROBID 调用失败：" + st.session_state["grobid_error"])
+    elif grobid_result:
+        st.caption(grobid_client.summarize(grobid_result))
+
+        rows = metadata_compare.build_comparison(metadata, grobid_result)
+        st.dataframe([{"字段": row["字段"], "本地规则": row["本地"],
+                       "GROBID": row["GROBID"], "结论": row["结论"]}
+                      for row in rows], hide_index=True, height=260)
+
+        actionable = [row for row in rows if row["可采信"]]
+        if actionable:
+            st.markdown("**一键采信**（写回上面的输入框，可再手动修改）")
+
+            # 注意：这里必须用**回调**而不是就地赋值。
+            # Streamlit 不允许在控件实例化之后再改它的 session_state，
+            # 而本面板位于输入框下方；回调在脚本重跑之前执行，因此不受此限制。
+            def take_grobid_scalar(target_key: str, value: str):
+                st.session_state[target_key] = value
+
+            def take_grobid_list(target_key: str, items: list):
+                current = st.session_state.get(target_key, "")
+                merged, added = metadata_compare.merge_missing(current, items)
+                if added:
+                    st.session_state[target_key] = merged
+                    st.session_state["grobid_take_note"] = (
+                        f"已补进 {len(added)} 条：{'、'.join(str(x)[:24] for x in added[:3])}"
+                        + ("…" if len(added) > 3 else ""))
+
+            for index, row in enumerate(actionable):
+                name = row["字段"]
+                if row["类型"] == "list":
+                    label = f"用 GROBID 补进 {len(row['新增'])} 条{name}"
+                    st.button(label, key=f"grobid_take_{index}_{row['字段键']}",
+                              on_click=take_grobid_list,
+                              args=(row["会话键"], row["新增"]))
+                else:
+                    label = f"采信 GROBID 的{name}"
+                    st.button(label, key=f"grobid_take_{index}_{row['字段键']}",
+                              on_click=take_grobid_scalar,
+                              args=(row["会话键"], row.get("GROBID原始", row["GROBID"])))
+
+            if st.session_state.get("grobid_take_note"):
+                st.success(st.session_state.pop("grobid_take_note"))
+            st.caption("列表字段采用**只补空、不覆盖**：GROBID 独有的条目追加进去，"
+                       "已有的保持本地版本，不会把本地的结果冲掉。"
+                       "想整段换成 GROBID 的结果，可以直接在输入框里手动替换。")
+        else:
+            st.success("所有可比字段两边一致，无需人工介入。")
+
+        st.caption(
+            "⚠️ GROBID 也会出错，实测过的例子：Nature 那篇**标题被抽成期刊名**"
+            "「nature human behaviour」；SAGE 那篇把题记里的「George Washington」当成作者；"
+            "Frontiers 那篇把侧栏的**编者与审稿人**当成作者；Cell Press 那篇的摘要"
+            "（叫 SUMMARY）**一条都没抽到**。所以不一致时请对照原 PDF 判断，不要盲信任何一边。"
+        )
 
 st.divider()
 
