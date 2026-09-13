@@ -453,6 +453,27 @@ _NAME_PARTICLES = {"van", "von", "de", "del", "della", "der", "den", "di", "da",
                    "du", "la", "le", "ter", "ten", "bin", "ibn", "al", "el", "st",
                    "mac", "mc", "i", "y"}
 _NAME_TOKEN_RE = re.compile(r"^[A-Z][A-Za-z'’\-]*\.?$")
+# 学科 / 院系词：**整串都是**这类词时就不当人名。
+# 真实案例：ACM CHI 那篇的作者网格里，"Media Engineering Technology"（院系名）
+# 被版面切成单独一块，不含任何单位关键词（University/Institute…），
+# 于是被人名规则放行、混进了作者列表。
+# 判据是「全部 token 都是学科词」而不是「含一个学科词」——
+# 否则像 "Andrew Law" 这类真名会被误杀。
+_FIELD_WORDS = {
+    "technology", "technologies", "engineering", "media", "science", "sciences",
+    "computing", "communications", "communication", "design", "arts", "art",
+    "studies", "systems", "informatics", "interaction", "psychology",
+    "biology", "medicine", "health", "education", "business", "physics",
+    "chemistry", "mathematics", "statistics", "humanities", "architecture",
+    "management", "economics", "neuroscience", "linguistics", "anthropology",
+    "sociology", "philosophy", "division",
+}
+# 名字后缀（全大写转正常大小写时要原样保留）
+_NAME_SUFFIXES = {"II", "III", "IV", "V", "VI", "JR", "SR"}
+# 被排版拆开的重音符号：Cell Press 那篇把 "Angéline" 排成了 "Ange´ lina"
+# （尖音符单独成一个字符）。把「字母 + ´/` + 空格」合成组合尖音符 U+0301，
+# 再做 NFC 合成就能还原成 é。用 (?<=[A-Za-z]) 保证只在字母后面动手。
+_SPLIT_ACCENT_RE = re.compile(r"(?<=[A-Za-z])\s*[´`]\s*")
 
 # 通讯作者线索
 _CORRESPONDENCE_RE = re.compile(
@@ -495,9 +516,17 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+def _repair_split_accents(text: str) -> str:
+    """
+    还原被排版拆开的重音字母："Ange´ lina" → "Angéline"（NFC 合成）。
+    不这样做的话，含重音的姓名会整段判不出人名（实测 Cell Press 那篇漏了 Angéline Vernetti）。
+    """
+    return unicodedata.normalize("NFC", _SPLIT_ACCENT_RE.sub("\u0301", text or ""))
+
+
 def _strip_markers(text: str) -> str:
     """去掉作者名后面的单位标记（¹ ² ³ / ^1,2 / * / †…）"""
-    text = _MARK_RE.sub(" ", text)
+    text = _MARK_RE.sub(" ", _repair_split_accents(text))
     text = _TRAILING_MARKER_RE.sub("", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip(" ,;.·•")
@@ -521,6 +550,10 @@ def looks_like_person_name(text: str) -> bool:
     tokens = text.split()
     if not 2 <= len(tokens) <= 5:
         return False
+    meaningful = [token.strip(".,'’").lower() for token in tokens
+                  if token.strip(".,'’").lower() not in _NAME_PARTICLES]
+    if meaningful and all(word in _FIELD_WORDS for word in meaningful):
+        return False                  # 整串都是学科/院系词（"Media Engineering Technology"）
     for token in tokens:
         clean = token.strip(".,'’")
         if not clean:
@@ -530,11 +563,37 @@ def looks_like_person_name(text: str) -> bool:
             continue
         if lowered in _NON_NAME_WORDS:
             return False
-        if not _NAME_TOKEN_RE.match(token):
+        # 首字母必须大写；允许重音字母（Angéline、Émile）
+        if not clean[:1].isupper():
+            return False
+        # 只允许字母（含重音）、撇号、连字符
+        if not re.fullmatch(r"[\w'’\-]+", clean):
             return False
         if len(clean) == 1 and not token.endswith("."):
             return False              # 单个字母必须是缩写（带点）
     return True
+
+
+def _tidy_name_case(text: str) -> str:
+    """
+    把全大写的作者名转成正常大小写（"LLOGARI CASAS" → "Llogari Casas"）。
+
+    为什么要做：有些期刊（ACM Games 那篇）作者名用小型大写字母排版，
+    PDF 取出来整串没有小写字母；和其他样本混在一起显示很扎眼，
+    也不方便与 GROBID 的结果对照。**只在整串完全没有小写字母时才转**，
+    所以 "Diane Pecher"、"Steve van Pelt" 这类原样保留。
+    """
+    if not text or any(ch.islower() for ch in text):
+        return text
+    words = []
+    for word in text.split():
+        if word.strip(".,") in _NAME_SUFFIXES:
+            words.append(word)
+        elif any(ch in word for ch in "'’-"):
+            words.append(word.title())          # O'BRIEN → O'Brien、JEAN-LUC → Jean-Luc
+        else:
+            words.append(word.capitalize())
+    return " ".join(words)
 
 
 def split_name_list(text: str) -> list:
@@ -548,7 +607,7 @@ def split_name_list(text: str) -> list:
     for part in re.split(r"\s*(?:,|;|\band\b|&)\s*", text, flags=re.IGNORECASE):
         candidate = _cut_at_institution(part)
         if looks_like_person_name(candidate):
-            names.append(candidate)
+            names.append(_tidy_name_case(candidate))
     return names
 
 
@@ -650,13 +709,24 @@ def extract_authors(blocks, title_value):
         text = block.text.strip()
         if not text or "@" in text:
             continue
-        if _CORRESPONDENCE_RE.search(text) or _INSTITUTION_RE.search(text):
+        if _CORRESPONDENCE_RE.search(text):
             continue
         if _ABSTRACT_HEADING_RE.match(text) or _TITLE_BLOCKLIST_RE.match(text):
             continue
         # 作者行通常比正文大、或者加粗；两条都不满足就不是作者行
         if body_size and block.max_size < body_size * 1.02 and block.bold_ratio < 0.5:
             continue
+
+        if _INSTITUTION_RE.search(text):
+            # 名字与单位挤在**同一块**里（ACM Games 那篇：
+            # "LLOGARI CASAS, 3FINERY LTD, Biggar, United Kingdom of Great Britain…"）。
+            # 早期实现看到单位词就整块丢弃，作者跟着一起没了（实测该样本作者数为 0）。
+            # 正确做法：把「第一个逗号之前、单位关键词之前」的那一段切出来当候选人名。
+            head = _cut_at_institution(re.split(r"[,;]", text)[0])
+            for name in split_name_list(head):
+                candidates.append((block.y0, block.x0, name))
+            continue
+
         for name in split_name_list(text):
             candidates.append((block.y0, block.x0, name))
 
@@ -716,23 +786,30 @@ def extract_affiliations(blocks, title_value, doc=None):
     """
     提取单位列表。返回 (单位列表, 来源说明, 备注)。
 
-    两个来源：① 作者区里的单位块；
-    ② 第一页页脚里**以编号开头**的单位块（Nature 把单位放在页脚小字里）。
-    页脚那条加了「必须编号开头」的限制，否则会把致谢、基金声明当成单位。
+    三个来源：
+      ① 作者区里的单位块（Elsevier / SAGE / Frontiers / ACM / xlm 都在这里）；
+      ② **第一页页脚**里以编号开头的小字块（Nature 把 ¹–⁶ 六个单位放在页脚）；
+      ③ **第二页**里以编号开头的小字块（Cell Press / Current Biology 把单位挪到第 2 页，
+         实测第 1 页一个单位关键词都没有）。
+    页脚与第 2 页那两条都加了「必须编号开头 + 含单位关键词」的限制，
+    否则会把致谢、基金声明、正文里以编号开头的句子当成单位。
     """
     zone, _ = author_zone(blocks, title_value)
     page_height = doc[0].rect.height if (doc is not None and doc.page_count) else 800.0
 
     pool = list(zone)
+    extra_page_two = False
     for block in blocks:
-        if block.page != 1 or block.y0 < page_height * 0.6:
+        if block.page not in (1, 2):
             continue
+        if block.page == 1 and block.y0 < page_height * 0.6:
+            continue                      # 第 1 页只看页脚区，作者区那条已经在 zone 里了
         text = block.text.strip()
-        if not re.match(r"^\s*[¹²³⁴⁵⁶⁷⁸⁹]|^\s*\d{1,2}\s*[A-Z(]", text):
-            continue
-        if not _INSTITUTION_RE.search(text):
+        if not _looks_like_affiliation_block(text):
             continue
         pool.append(block)
+        if block.page == 2:
+            extra_page_two = True
 
     entries, source_note = [], ""
     for block in pool:
@@ -754,11 +831,14 @@ def extract_affiliations(blocks, title_value, doc=None):
                 continue
             entries.append(item)
         if block not in zone:
-            source_note = "（含第一页页脚小字里的单位）"
+            source_note = "（含页脚小字里的单位）"
 
     if not entries:
         return [], "未找到", "没有找到单位信息，请手动填写"
-    return entries, f"第 1 页作者区 / 页脚{source_note}", ""
+    source = "第 1 页作者区" + (" / 页脚" if source_note else "")
+    if extra_page_two:
+        source = "第 1 页作者区 / 第 2 页脚注" + ("（也含页脚）" if source_note else "")
+    return entries, source + source_note, ""
 
 
 def _normalize_name(text: str) -> str:
