@@ -44,9 +44,16 @@ FIELD_SPECS = [
 ]
 
 
+# 被排版拆开的重音：GROBID 与部分 PDF 会把 "Angéline" 写成 "Ange ´lina"
+# （尖音符单独成一个字符，后面还跟空格）。归一化时必须一并处理，
+# 否则同一个人会被判成「两边各有独有项」，白白制造告警。
+_SPLIT_ACCENT_RE = re.compile(r"(?<=[A-Za-z])\s*[´`]\s*")
+
+
 def _strip_accents(text: str) -> str:
-    """去重音：Angéline 与 Angeline 视为同一个名字"""
-    text = unicodedata.normalize("NFKD", text or "")
+    """去重音：Angéline 与 Angeline 视为同一个名字（并修复被拆开的 ´ ）"""
+    text = _SPLIT_ACCENT_RE.sub("\u0301", text or "")
+    text = unicodedata.normalize("NFKD", text)
     return "".join(ch for ch in text if not unicodedata.combining(ch))
 
 
@@ -128,6 +135,25 @@ def compare_text(local_text: str, grobid_text: str) -> str:
     return "内容不同"
 
 
+def _local_emails(local_meta) -> list:
+    """
+    本地规则抽到的全部邮箱：作者区逐个配对的那个 + 通讯邮箱（可能来自 mailto 链接或通讯段落）。
+
+    为什么要合并再比：GROBID 头部抽取通常只给「通讯邮箱」，而本地的 `author_emails`
+    只覆盖「作者区逐作者列邮箱」的排版（ACM 那类）。只拿后者去比，
+    会把「Elsevier/SAGE 这类本地有通讯邮箱、只是放在另一个字段」的情况误判成
+    「GROBID 更全」，制造假差异。
+    """
+    if not local_meta:
+        return []
+    emails = [line.strip() for line in (local_meta.author_emails.value or "").splitlines()
+              if line.strip()]
+    corresponding = (local_meta.corresponding_email.value or "").strip()
+    if corresponding and not any(corresponding.lower() in item.lower() for item in emails):
+        emails.append(corresponding)
+    return emails
+
+
 def build_comparison(local_meta, grobid: dict) -> list:
     """
     产出逐字段对比行，供界面直接渲染成表格。
@@ -154,8 +180,7 @@ def build_comparison(local_meta, grobid: dict) -> list:
                          grobid_authors[0] if grobid_authors else ""),
         "affiliations": (local_meta.affiliation_list() if local_meta else [],
                          grobid.get("affiliations", [])),
-        "author_emails": ((local_meta.author_emails.value.splitlines()
-                           if local_meta else []), grobid_emails),
+        "author_emails": (_local_emails(local_meta), grobid_emails),
     }
 
     rows = []
