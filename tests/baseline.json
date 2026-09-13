@@ -1,0 +1,565 @@
+{
+  "采集时间": "2026-09-13 15:29:08",
+  "样本目录": "E:\\segemented pdf reader\\测试pdf",
+  "样本数": 10,
+  "样本": {
+    "1-s2.0-S0960982215012476-main.pdf": {
+      "文件": "1-s2.0-S0960982215012476-main.pdf",
+      "页数": 7,
+      "原子块数": 112,
+      "段落数": 94,
+      "卡片数": 16,
+      "正文总词数": 3821,
+      "卡片词数中位": 246,
+      "卡片词数最小": 156,
+      "卡片词数最大": 297,
+      "角色分布": {
+        "body": 41,
+        "caption": 2,
+        "copyright": 8,
+        "front_matter": 10,
+        "heading": 8,
+        "label": 9,
+        "reference": 34
+      },
+      "公式区域数": 0,
+      "公式图片段落数": 0,
+      "元数据": {
+        "标题": "Early Social Experience Affects the Development of Eye Gaze Processing",
+        "DOI": "10.1016/j.cub.2015.10.019",
+        "摘要词数": 219,
+        "作者列表": [
+          "Atsushi Senju",
+          "Angélina Vernetti",
+          "Natasa Ganea",
+          "Kristelle Hudry",
+          "Leslie Tucker",
+          "Tony Charman",
+          "Mark H. Johnson"
+        ],
+        "第一作者": "Atsushi Senju",
+        "通讯作者": "Atsushi Senju",
+        "通讯邮箱": "a.senju@bbk.ac.uk",
+        "作者单位": [
+          "¹ Centre for Brain and Cognitive Development, Birkbeck, University of London, Malet Street, London WC1E",
+          "² Olga Tennison Autism Research Centre, School of Psychology and Public Health, La Trobe University, Melbourne, VIC 3086, Australia",
+          "³ Department of Psychology, Institute of Psychiatry, Psychology & Neuroscience, King’s College London, P.O. Box 077, De Crespigny Park, London SE5"
+        ],
+        "作者邮箱": [
+          "Atsushi Senju <a.senju@bbk.ac.uk>"
+        ],
+        "附件链接": []
+      },
+      "_允许变化": {
+        "解析耗时": 0.09,
+        "元数据来源": {
+          "标题": "字号分析（18.9pt，第 1 页）",
+          "DOI": "第 1 页超链接",
+          "通讯作者": "通讯标注段落（第 2 页）",
+          "附件链接": "未找到"
+        }
+      }
+    },
+    "自然互动中孤独症儿童面部表情动态的量化评估.pdf": {
+      "文件": "自然互动中孤独症儿童面部表情动态的量化评估.pdf",
+      "页数": 11,
+      "原子块数": 203,
+      "段落数": 194,
+      "卡片数": 32,
+      "正文总词数": 7206,
+      "卡片词数中位": 222,
+      "卡片词数最小": 50,
+      "卡片词数最大": 537,
+      "角色分布": {
+        "author": 5,
+        "body": 158,
+        "copyright": 5,
+        "header_footer": 21,
+        "heading": 9,
+        "label": 2,
+        "reference": 3
+      },
+      "公式区域数": 1,
+      "公式图片段落数": 1,
+      "元数据": {
+        "标题": "Naturalistic facial dynamics enable quantitative clinical assessment of atypical expression phenotypes in children with autism spectrum disorder",
+        "DOI": "10.1038/s41746-026-02375-1",
+        "摘要词数": 202,
+        "作者列表": [
+          "Minghao Du",
+          "Ping Shi",
+          "Zehao Liu",
+          "Yunuo Xu",
+          "Xiaoya Liu",
+          "Wei Liu",
+          "Shuang Liu",
+          "Dong Ming"
+        ],
+        "第一作者": "Minghao Du",
+        "通讯作者": "",
+        "通讯邮箱": "lance1971@163.com",
+        "作者单位": [
+          "¹ Medical School, Tianjin University, Tianjin, China",
+          "² State Key Laboratory of Advanced Medical Materials and Medical Devices, Tianjin University, Tianjin, China. ³"
+        ],
+        "作者邮箱": [],
+        "附件链接": [
+          "https://github.com/FromNature/AutismFacialDetection"
+        ]
+      },
+      "_允许变化": {
+        "解析耗时": 0.32,
+        "元数据来源": {
+          "标题": "字号分析（25.9pt，第 1 页）",
+          "DOI": "第 1 页超链接",
+          "通讯作者": "未找到",
+          "附件链接": "全页扫描链接注释与正文 URL（1 条）"
+        }
+      }
+    },
+    "1-s2.0-S002210312600020X-main.pdf": {
+      "文件": "1-s2.0-S002210312600020X-main.pdf",
+      "页数": 12,
+      "原子块数": 223,
+      "段落数": 155,
+      "卡片数": 43,
+      "正文总词数": 10479,
+      "卡片词数中位": 244,
+      "卡片词数最小": 122,
+      "卡片词数最大": 433,
+      "角色分布": {
+        "author": 5,
+        "body": 85,
+        "caption": 12,
+        "copyright": 1,
+        "header_footer": 19,
+        "heading": 27,
+        "label": 2,
+        "reference": 72
+      },
+      "公式区域数": 0,
+      "公式图片段落数": 0,
+      "元数据": {
+        "标题": "How stereotypes develop from memory limitations and second-hand knowledge",
+        "DOI": "10.1016/j.jesp.2026.104890",
+        "摘要词数": 229,
+        "作者列表": [
+          "Diane Pecher",
+          "Joel Bornemann",
+          "Steve van Pelt",
+          "Steven Verheyen",
+          "Heleen van Mierlo"
+        ],
+        "第一作者": "Diane Pecher",
+        "通讯作者": "Diane Pecher",
+        "通讯邮箱": "pecher@essb.eur.nl",
+        "作者单位": [
+          "Erasmus University Rotterdam, The Netherlands"
+        ],
+        "作者邮箱": [],
+        "附件链接": [
+          "https://osf.io/gs2u9/?view_only=62daf60f9923430590e137f02bb2d12a"
+        ]
+      },
+      "_允许变化": {
+        "解析耗时": 0.13,
+        "元数据来源": {
+          "标题": "字号分析（13.4pt，第 1 页）",
+          "DOI": "第 1 页超链接",
+          "通讯作者": "通讯邮箱反查（pecher@essb.eur.nl）",
+          "附件链接": "全页扫描链接注释与正文 URL（1 条）"
+        }
+      }
+    },
+    "10.1177_01461672241254695.pdf": {
+      "文件": "10.1177_01461672241254695.pdf",
+      "页数": 20,
+      "原子块数": 262,
+      "段落数": 213,
+      "卡片数": 55,
+      "正文总词数": 12398,
+      "卡片词数中位": 216,
+      "卡片词数最小": 117,
+      "卡片词数最大": 340,
+      "角色分布": {
+        "author": 2,
+        "body": 125,
+        "caption": 8,
+        "copyright": 1,
+        "header_footer": 41,
+        "heading": 25,
+        "label": 1,
+        "reference": 59
+      },
+      "公式区域数": 0,
+      "公式图片段落数": 0,
+      "元数据": {
+        "标题": "Many Mickles Make a Muckle: Evidence That Gender Stereotypes Reemerge Spontaneously Via Cultural Evolution",
+        "DOI": "10.1177/01461672241254695",
+        "摘要词数": 145,
+        "作者列表": [
+          "Carolyn J. Dallimore",
+          "Kenny Smith",
+          "Jacqui Hutchison",
+          "Gillian Slessor",
+          "Douglas Martin"
+        ],
+        "第一作者": "Carolyn J. Dallimore",
+        "通讯作者": "Douglas Martin",
+        "通讯邮箱": "doug.martin@abdn.ac.uk",
+        "作者单位": [
+          "¹ University of Aberdeen, UK",
+          "² The University of Edinburgh, UK"
+        ],
+        "作者邮箱": [],
+        "附件链接": [
+          "https://osf.io/nf2pj/?view_only=4a719fd5eaae4b158385c070e2f3f181"
+        ]
+      },
+      "_允许变化": {
+        "解析耗时": 0.27,
+        "元数据来源": {
+          "标题": "字号分析（18.0pt，第 1 页）",
+          "DOI": "前两页交叉验证（第 1、1 页都出现）",
+          "通讯作者": "通讯标注段落（第 1 页）",
+          "附件链接": "全页扫描链接注释与正文 URL（1 条）"
+        }
+      }
+    },
+    "3772318.3791719.pdf": {
+      "文件": "3772318.3791719.pdf",
+      "页数": 19,
+      "原子块数": 334,
+      "段落数": 283,
+      "卡片数": 46,
+      "正文总词数": 10855,
+      "卡片词数中位": 227,
+      "卡片词数最小": 107,
+      "卡片词数最大": 561,
+      "角色分布": {
+        "author": 15,
+        "body": 152,
+        "caption": 12,
+        "copyright": 2,
+        "header_footer": 16,
+        "heading": 40,
+        "label": 1,
+        "reference": 96
+      },
+      "公式区域数": 0,
+      "公式图片段落数": 0,
+      "元数据": {
+        "标题": "Tuning into Everyday Ecologies: Children’s Slow Noticing in Food Gardens",
+        "DOI": "10.1145/3772318.3791719",
+        "摘要词数": 150,
+        "作者列表": [
+          "Yanxia Li",
+          "Madeleine Rose Dobson",
+          "Tshering Dema",
+          "Kellie Vella",
+          "Margot Brereton"
+        ],
+        "第一作者": "Yanxia Li",
+        "通讯作者": "",
+        "通讯邮箱": "",
+        "作者单位": [
+          "School of Education",
+          "School of Computer Science Queensland University of Technology",
+          "Curtin University Bentley, Western Australia, Australia"
+        ],
+        "作者邮箱": [
+          "Madeleine Rose Dobson <madeleine.dobson@curtin.edu.au>",
+          "Yanxia Li <yanxia.li@hdr.qut.edu.au>",
+          "Kellie Vella <kellie.vella@qut.edu.au>",
+          "Tshering Dema <t3.dema@qut.edu.au>",
+          "Margot Brereton <m.brereton@qut.edu.au>"
+        ],
+        "附件链接": []
+      },
+      "_允许变化": {
+        "解析耗时": 1.74,
+        "元数据来源": {
+          "标题": "字号分析（17.2pt，第 1 页）",
+          "DOI": "第 1 页超链接",
+          "通讯作者": "未找到",
+          "附件链接": "未找到"
+        }
+      }
+    },
+    "fpsyg-17-1823262.pdf": {
+      "文件": "fpsyg-17-1823262.pdf",
+      "页数": 20,
+      "原子块数": 520,
+      "段落数": 469,
+      "卡片数": 55,
+      "正文总词数": 12389,
+      "卡片词数中位": 224,
+      "卡片词数最小": 116,
+      "卡片词数最大": 294,
+      "角色分布": {
+        "body": 253,
+        "copyright": 1,
+        "header_footer": 80,
+        "heading": 28,
+        "reference": 158
+      },
+      "公式区域数": 0,
+      "公式图片段落数": 0,
+      "元数据": {
+        "标题": "Multiple dimensions of reward-sensitivity and cognitive control relate to psychopathology: an exploratory structural equation modeling approach",
+        "DOI": "10.3389/fpsyg.2026.1823262",
+        "摘要词数": 152,
+        "作者列表": [
+          "Analicia K. Howard",
+          "Roselinde H. Kaiser",
+          "Naomi P. Friedman"
+        ],
+        "第一作者": "Analicia K. Howard",
+        "通讯作者": "Analicia K. Howard",
+        "通讯邮箱": "analicia.howard@colorado.edu",
+        "作者单位": [
+          "¹ Institute for Behavioral Genetics, University of Colorado Boulder, Boulder, CO, United States",
+          "² Department of Psychology and Neuroscience, University of Colorado Boulder, Boulder, CO, United States",
+          "³ Institute of Cognitive Science, University of Colorado Boulder, Boulder, CO, United States",
+          "⁴ Renée Crown Wellness Institute, University of Colorado Boulder, Boulder, CO, United States"
+        ],
+        "作者邮箱": [
+          "Analicia K. Howard <analicia.howard@colorado.edu>"
+        ],
+        "附件链接": [
+          "https://doi.org/10.17605/OSF.IO/JKNR5",
+          "http://dx.doi.org/10.15154/z563-zd24",
+          "https://osf.io/jknr5",
+          "https://10.15154/8873-zj65",
+          "https://www.frontiersin.org/articles/10.3389/fpsyg.2026.1823262/full#supplementary-material"
+        ]
+      },
+      "_允许变化": {
+        "解析耗时": 0.34,
+        "元数据来源": {
+          "标题": "字号分析（20.9pt，第 1 页）",
+          "DOI": "第 1 页超链接",
+          "通讯作者": "通讯标注段落（第 1 页）",
+          "附件链接": "全页扫描链接注释与正文 URL（5 条）"
+        }
+      }
+    },
+    "s41562-026-02534-0.pdf": {
+      "文件": "s41562-026-02534-0.pdf",
+      "页数": 26,
+      "原子块数": 832,
+      "段落数": 684,
+      "卡片数": 82,
+      "正文总词数": 19269,
+      "卡片词数中位": 223,
+      "卡片词数最小": 103,
+      "卡片词数最大": 371,
+      "角色分布": {
+        "author": 2,
+        "body": 692,
+        "copyright": 3,
+        "header_footer": 82,
+        "heading": 50,
+        "reference": 3
+      },
+      "公式区域数": 3,
+      "公式图片段落数": 3,
+      "元数据": {
+        "标题": "Hierarchical resource rationality explains human reading behaviour",
+        "DOI": "10.1038/s41562-026-02534-0",
+        "摘要词数": 159,
+        "作者列表": [
+          "Yunpeng Bai",
+          "Xiaofu Jin",
+          "Shengdong Zhao",
+          "Antti Oulasvirta"
+        ],
+        "第一作者": "Yunpeng Bai",
+        "通讯作者": "Antti Oulasvirta",
+        "通讯邮箱": "antti.oulasvirta@aalto.fi",
+        "作者单位": [
+          "¹ Department of Computer Science, School of Computing, National University of Singapore, Singapore, Singapore",
+          "² Department of Information and Communications Engineering, School of Electrical Engineering, Aalto University, Espoo, Finland",
+          "³ Computational Media and Arts Thrust, Information Hub, The Hong Kong University of Science and Technology, Guangzhou, China",
+          "⁴ Academy of Interdisciplinary Studies, The Hong Kong University of Science and Technology, Hong Kong, China",
+          "⁵ School of Creative Media, Department of Computer Science, City University of Hong Kong, Hong Kong, China",
+          "⁶ ELLIS Institute Finland, Espoo, Finland"
+        ],
+        "作者邮箱": [],
+        "附件链接": [
+          "https://osf.io/q2dm6/",
+          "https://doi.org/10.17605/OSF.IO/Q2DM6",
+          "https://github.com/BaiYunpeng1949/hierarchical-resource-rational-reader/"
+        ]
+      },
+      "_允许变化": {
+        "解析耗时": 1.35,
+        "元数据来源": {
+          "标题": "字号分析（26.0pt，第 1 页）",
+          "DOI": "第 1 页超链接",
+          "通讯作者": "通讯邮箱反查（antti.oulasvirta@aalto.fi）",
+          "附件链接": "全页扫描链接注释与正文 URL（3 条）"
+        }
+      }
+    },
+    "xlm-xlm0000357.pdf": {
+      "文件": "xlm-xlm0000357.pdf",
+      "页数": 17,
+      "原子块数": 305,
+      "段落数": 266,
+      "卡片数": 50,
+      "正文总词数": 11460,
+      "卡片词数中位": 226,
+      "卡片词数最小": 111,
+      "卡片词数最大": 296,
+      "角色分布": {
+        "author": 2,
+        "body": 118,
+        "caption": 2,
+        "copyright": 2,
+        "header_footer": 35,
+        "heading": 18,
+        "reference": 128
+      },
+      "公式区域数": 0,
+      "公式图片段落数": 0,
+      "元数据": {
+        "标题": "Recognition Memory for Hue: Prototypical Bias and the Role of Labeling",
+        "DOI": "10.1037/xlm0000357",
+        "摘要词数": 208,
+        "作者列表": [
+          "Laura Jane Kelly",
+          "Evan Heit"
+        ],
+        "第一作者": "Laura Jane Kelly",
+        "通讯作者": "Laura Jane Kelly",
+        "通讯邮箱": "lkelly@ucmerced.edu",
+        "作者单位": [
+          "University of California, Merced"
+        ],
+        "作者邮箱": [],
+        "附件链接": []
+      },
+      "_允许变化": {
+        "解析耗时": 0.29,
+        "元数据来源": {
+          "标题": "字号分析（16.0pt，第 1 页）",
+          "DOI": "第 1 页超链接",
+          "通讯作者": "通讯标注段落（第 1 页）",
+          "附件链接": "未找到"
+        }
+      }
+    },
+    "单栏.pdf": {
+      "文件": "单栏.pdf",
+      "页数": 16,
+      "原子块数": 268,
+      "段落数": 245,
+      "卡片数": 25,
+      "正文总词数": 5548,
+      "卡片词数中位": 227,
+      "卡片词数最小": 135,
+      "卡片词数最大": 297,
+      "角色分布": {
+        "author": 1,
+        "body": 188,
+        "caption": 6,
+        "copyright": 1,
+        "header_footer": 30,
+        "heading": 20,
+        "label": 1,
+        "reference": 21
+      },
+      "公式区域数": 32,
+      "公式图片段落数": 32,
+      "元数据": {
+        "标题": "Adaptive Interaction Paradigm for Mixed Reality Games",
+        "DOI": "10.1145/3768627",
+        "摘要词数": 163,
+        "作者列表": [
+          "Llogari Casas"
+        ],
+        "第一作者": "Llogari Casas",
+        "通讯作者": "Llogari Casas",
+        "通讯邮箱": "permissions@acm.org",
+        "作者单位": [
+          "3 FINERY LTD, Biggar, United Kingdom of Great Britain and Northern Ireland"
+        ],
+        "作者邮箱": [],
+        "附件链接": []
+      },
+      "_允许变化": {
+        "解析耗时": 1.06,
+        "元数据来源": {
+          "标题": "字号分析（14.3pt，第 1 页）",
+          "DOI": "第 1 页超链接",
+          "通讯作者": "通讯邮箱反查（llogari92@gmail.com）",
+          "附件链接": "未找到"
+        }
+      }
+    },
+    "双栏.pdf": {
+      "文件": "双栏.pdf",
+      "页数": 10,
+      "原子块数": 225,
+      "段落数": 194,
+      "卡片数": 26,
+      "正文总词数": 6138,
+      "卡片词数中位": 241,
+      "卡片词数最小": 182,
+      "卡片词数最大": 306,
+      "角色分布": {
+        "author": 17,
+        "body": 112,
+        "caption": 15,
+        "copyright": 2,
+        "header_footer": 12,
+        "heading": 28,
+        "label": 1,
+        "reference": 38
+      },
+      "公式区域数": 1,
+      "公式图片段落数": 1,
+      "元数据": {
+        "标题": "It’s Not Always the Same Eye That Dominates: Effects of Viewing Angle, Handedness and Eye Movement in 3D",
+        "DOI": "10.1145/3706598.3713992",
+        "摘要词数": 99,
+        "作者列表": [
+          "Franziska Prummer",
+          "Mohamed Shereef Abdelwahab",
+          "Florian Weidner",
+          "Yasmeen Abdrabou",
+          "Hans Gellersen"
+        ],
+        "第一作者": "Franziska Prummer",
+        "通讯作者": "",
+        "通讯邮箱": "",
+        "作者单位": [
+          "School of Computing and",
+          "Lancaster University Lancaster, United Kingdom",
+          "German University in Cairo",
+          "Communications Lancaster University Lancaster, United Kingdom f.prummer@lancaster.ac.uk",
+          "Lancaster University Lancaster, United Kingdom y.abdrabou@lancaster.ac.uk",
+          "Aarhus University"
+        ],
+        "作者邮箱": [
+          "Franziska Prummer <f.prummer@lancaster.ac.uk>",
+          "Mohamed Shereef Abdelwahab <mohamed.shereef@student.guc.edu.eg>",
+          "Yasmeen Abdrabou <y.abdrabou@lancaster.ac.uk>",
+          "Florian Weidner <f.weidner@lancaster.ac.uk>",
+          "Hans Gellersen <hwg@cs.au.dk>"
+        ],
+        "附件链接": []
+      },
+      "_允许变化": {
+        "解析耗时": 3.82,
+        "元数据来源": {
+          "标题": "字号分析（17.2pt，第 1 页）",
+          "DOI": "第 1 页超链接",
+          "通讯作者": "未找到",
+          "附件链接": "未找到"
+        }
+      }
+    }
+  }
+}
