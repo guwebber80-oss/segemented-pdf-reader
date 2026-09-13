@@ -54,6 +54,20 @@ python -m venv .venv
 
 ## 运行
 
+**最省事：双击 `启动阅读器.bat`**（就在项目根目录）。它会依次做四件事：
+
+1. 检查 `app.py`、虚拟环境、依赖与全部模块能否导入（缺依赖会直接给出修复命令并可一键安装）；
+2. 顺手在后台把 GROBID 容器起起来（没装 Docker / Docker 没开会自动跳过，不影响阅读）；
+3. 检查 8501 端口是否已被占用（已占用就直接帮你打开浏览器）；
+4. 启动阅读器并自动打开浏览器。
+
+> 想只体检不启动：命令行执行 `启动阅读器.bat --check`。
+> 关闭那个黑窗口 = 停止阅读器；停止 GROBID 用 `docker stop grobid`。
+> 这个 bat 是**路径无关**的（按自身所在目录定位项目），整个文件夹改名或搬到别的盘都能用，
+> 只要它和 `app.py` 待在同一个文件夹里。**它是 GBK + CRLF 编码，别用记事本另存成 UTF-8**，否则 cmd 解析中文会报 `xxx is not recognized`。
+
+手动启动（等价做法）：
+
 ```powershell
 # 推荐：不激活虚拟环境，直接用 venv 里的 python 运行（不受脚本执行策略影响）
 .\.venv\Scripts\python.exe -m streamlit run app.py
