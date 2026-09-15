@@ -53,9 +53,12 @@ body.immersive .stage-tools{margin-left:auto}
 .brand .dot{width:10px;height:10px;border-radius:50%;background:var(--accent);
   box-shadow:0 0 0 4px var(--accent-soft)}
 .brand small{display:block;font-weight:400;color:var(--ink-3);font-size:12px}
-.group{border-top:1px dashed var(--line);padding-top:12px}
+.group{border-top:1px dashed var(--line);padding-top:12px;flex:0 0 auto}
 .group:first-of-type{border-top:0;padding-top:0}
-.group.grow{flex:1;min-height:120px;display:flex;flex-direction:column}
+/* 章节导航占满剩余高度，并**自己内部滚动**：
+   左栏是固定高度的 flex 列，如果让它溢出，列表会盖在下面的「处理状态」上（实测踩到：
+   目录与状态文字重合）。所以这里给 min-height:0 + overflow-y:auto，把溢出关进自己这一块。 */
+.group.grow{flex:1 1 auto;min-height:140px;display:flex;flex-direction:column}
 .group-title{font-size:12px;font-weight:700;color:var(--ink-3);letter-spacing:.08em;
   text-transform:uppercase;margin-bottom:8px}
 .tool{width:100%;display:flex;align-items:center;gap:10px;padding:11px 12px;border-radius:12px;
@@ -71,7 +74,8 @@ body.immersive .stage-tools{margin-left:auto}
 .seg{display:flex;border:1px solid var(--line);border-radius:11px;overflow:hidden}
 .seg button{flex:1;padding:8px 0;border:0;background:#fff;color:var(--ink-2);font-size:13px}
 .seg button.on{background:var(--accent);color:#fff;font-weight:600}
-#nav{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+#nav{list-style:none;margin:0;padding:0;flex:1 1 auto;min-height:0;overflow-y:auto;
+  overscroll-behavior:contain;display:flex;flex-direction:column;gap:2px}
 #nav button{width:100%;text-align:left;border:0;background:transparent;padding:6px 9px;
   border-radius:9px;font-size:13px;color:var(--ink-2);line-height:1.35}
 #nav button:hover{background:#f2f6fd}
@@ -84,6 +88,15 @@ body.immersive .stage-tools{margin-left:auto}
 .doc-title{font-size:13px;color:var(--ink-2);white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis;flex:1}
 .stage-tools{display:flex;gap:6px;align-items:center}
+/* 常驻工具条（卡片区右上角）：沉浸模式会藏掉左右两栏，所以「退出沉浸」与中英切换
+   必须放在**不会被隐藏**的地方——这是 demo 里验证过的位置（实测踩到：原来把沉浸按钮放在
+   左栏，一进沉浸就找不到出口了） */
+.hbtn{border:1px solid var(--line);background:#fff;border-radius:9px;padding:5px 10px;
+  color:var(--ink-2);font-size:12.5px;white-space:nowrap}
+.hbtn:hover{border-color:var(--accent);color:var(--accent)}
+.hbtn.on{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.seg.mini{border-radius:9px;flex:0 0 auto}
+.seg.mini button{padding:5px 10px;font-size:12.5px;flex:0 0 auto}
 .pill{font-size:12px;color:var(--ink-2);border:1px solid var(--line);background:#fff;
   border-radius:999px;padding:4px 10px}
 .pill.ok{border-color:#bfe6d3;color:var(--ok);background:#f2fbf7}

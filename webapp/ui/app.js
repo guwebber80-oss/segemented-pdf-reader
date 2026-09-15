@@ -176,12 +176,12 @@ function renderChrome() {
     + `${esc([c.number, c.section].filter(Boolean).join(' ') || '文首')}</button></li>`).join('') : '';
   $('prev').disabled = !paper || total < 2;
   $('next').disabled = !paper || total < 2;
-  document.querySelectorAll('#lang-seg button').forEach((b) =>
+  document.querySelectorAll('#lang-seg button, #lang-seg-top button').forEach((b) =>
     b.classList.toggle('on', b.dataset.lang === state.lang));
   document.querySelectorAll('#height-seg button').forEach((b) =>
     b.classList.toggle('on', b.dataset.h === state.height));
-  $('btn-immersive').textContent = state.immersive
-    ? '⤡ 退出沉浸（显示两栏）' : '⤢ 沉浸模式（隐藏两栏）';
+  // 常驻工具条上的按钮：文案随状态变，任何时候都点得到（沉浸模式也看得见）
+  $('btn-immersive').textContent = state.immersive ? '⤡ 退出沉浸' : '⤢ 沉浸模式';
   $('btn-immersive').setAttribute('aria-pressed', String(state.immersive));
   $('btn-immersive').classList.toggle('on', state.immersive);
   document.body.className = 'h-' + state.height + (state.immersive ? ' immersive' : '');
@@ -200,7 +200,8 @@ function renderMeta() {
   const order = ['doi', 'authors', 'first_author', 'corresponding', 'corresponding_email',
     'affiliations', 'supplementary', 'author_emails'];
   $('meta-list').innerHTML = order.map((key) => {
-    const field = meta[key];
+    // 防御式取字段：后端一定会给全十项，但界面不该因为少一项就整页崩掉
+    const field = meta[key] || { label: key, value: '', source: '', found: false, note: '' };
     const value = (field.value || '（未找到）').replace(/\n/g, '　');
     const flag = field.found ? '' : ' ⚠️';
     return `<dt>${esc(field.label)}${flag}</dt><dd>${esc(value.slice(0, 300))}`
@@ -300,6 +301,10 @@ function bind() {
     const btn = e.target.closest('button'); if (!btn || !state.paper) return;
     setLang(btn.dataset.lang);
   });
+  $('lang-seg-top').addEventListener('click', (e) => {
+    const btn = e.target.closest('button'); if (!btn || !state.paper) return;
+    setLang(btn.dataset.lang);
+  });
   $('height-seg').addEventListener('click', (e) => {
     const btn = e.target.closest('button'); if (!btn) return;
     state.height = btn.dataset.h; savePrefs(); renderChrome(); updateScrollHint();
@@ -331,12 +336,16 @@ function bind() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && lightboxOpen()) { closeLightbox(); return; }
     if (lightboxOpen()) return;                       // 灯箱开着时方向键不再翻卡
-    if (!state.paper) return;
     const key = e.key.toLowerCase();
+    // ⚠️ 沉浸开关必须放在「有没有打开文献」的判断**之前**：
+    // 实测踩到——原来它在后面，没打开文献时按 I 没有任何反应，而按钮又在被隐藏的左栏里，
+    // 结果进了沉浸就出不来。Esc 也一并作为退出键（熟悉的"返回"语义）。
+    if (key === 'i') { setImmersive(!state.immersive); return; }
+    if (e.key === 'Escape' && state.immersive) { setImmersive(false); return; }
+    if (!state.paper) return;
     if (e.key === 'ArrowLeft') goto(state.i - 1, true);
     else if (e.key === 'ArrowRight') goto(state.i + 1, false);
     else if (key === 'l') setLang(state.lang === 'zh' ? 'en' : 'zh');
-    else if (key === 'i') setImmersive(!state.immersive);
   });
 
   window.addEventListener('resize', updateScrollHint);

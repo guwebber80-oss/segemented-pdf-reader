@@ -38,8 +38,8 @@
         <button data-h="normal" class="on">标准</button>
         <button data-h="loose">宽松</button>
       </div>
-      <button class="tool small" id="btn-immersive" aria-pressed="false">⤢ 沉浸模式（隐藏两栏）</button>
-      <div class="cache">快捷键：<b>← →</b> 翻页 · <b>L</b> 中英 · <b>I</b> 沉浸 · <b>Esc</b> 关灯箱</div>
+      <div class="cache">沉浸模式与中英切换在<b>卡片区右上角</b>（那两个按钮在任何模式下都看得见）。<br>
+        快捷键：<b>← →</b> 翻页 · <b>L</b> 中英 · <b>I</b> 沉浸 · <b>Esc</b> 关灯箱 / 退出沉浸</div>
     </div>
 
     <div class="group grow">
@@ -58,6 +58,13 @@
     <header class="stage-head">
       <div class="doc-title" id="doc-title">科研文献 PDF 智能阅读器 · 网页版</div>
       <div class="stage-tools">
+        <!-- 常驻工具条：沉浸模式不会隐藏这里，所以出口永远在 -->
+        <div class="seg mini" id="lang-seg-top">
+          <button data-lang="zh" class="on">中文</button>
+          <button data-lang="en">English</button>
+        </div>
+        <button class="hbtn" id="btn-immersive" aria-pressed="false"
+                title="隐藏左右两栏，只看卡片（快捷键 I；Esc 也能退出）">⤢ 沉浸模式</button>
         <span class="pill" id="pill-cache">未打开文献</span>
       </div>
     </header>
