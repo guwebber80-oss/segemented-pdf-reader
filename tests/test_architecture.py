@@ -27,6 +27,7 @@ except Exception:
 
 UTILS = os.path.join(PROJECT, "utils")
 UI = os.path.join(PROJECT, "ui")
+WEBAPP = os.path.join(PROJECT, "webapp")          # 网页版（自建前端）的后端
 
 passed, failed = 0, 0
 
@@ -58,7 +59,7 @@ check(f"{len(module_files(UTILS))} 个模块都不 import streamlit", offenders 
 print()
 print("② 包内用相对导入，外部用 utils.xxx（不得再出现扁平的 import pdf_parser 之类）")
 flat = []
-for folder in (UTILS, UI):
+for folder in (UTILS, UI, WEBAPP):
     for name in module_files(folder):
         path = os.path.join(folder, name)
         for number, line in enumerate(open(path, encoding="utf-8"), 1):
@@ -136,7 +137,8 @@ def bound_names(node, into):
             into.add(child.arg)
 
 
-TARGET_FILES = ([os.path.join(UTILS, name) for name in module_files(UTILS)]
+TARGET_FILES = ([os.path.join(WEBAPP, name) for name in module_files(WEBAPP)]
+                + [os.path.join(UTILS, name) for name in module_files(UTILS)]
                 + [os.path.join(UI, name) for name in module_files(UI)]
                 # app.py 也要查：实测给它加三栏布局时漏导入 is_formula_item /
                 # is_table_item / paragraph_formula_payload，只有真跑到那一段才会 NameError
@@ -177,7 +179,7 @@ check("utils / ui / app.py 的函数与模块级代码都没有未定义名", un
 print()
 print("⑥ 语法与 AST 检查：所有模块都能解析（防止搬运时留下半截代码）")
 broken = []
-for folder in (UTILS, UI, os.path.join(PROJECT, "tests")):
+for folder in (UTILS, UI, WEBAPP, os.path.join(PROJECT, "tests")):
     for name in sorted(os.listdir(folder)):
         if not name.endswith(".py"):
             continue
@@ -218,6 +220,14 @@ for statement in app_tree.body:
     bound_names(statement, own)
     seen |= own
 check("app.py 里 with / for 用到的名字都在之前绑定过", ordered == [], repr(ordered[:2]))
+
+print()
+print("⑨ 网页版后端也不依赖 Streamlit（同一个引擎，两套前端）")
+# 这条是自建前端的结构性保证：webapp/ 只能用 utils/ 的纯逻辑，不能偷偷 import streamlit
+web_offenders = [name for name in module_files(WEBAPP)
+                 if "streamlit" in open(os.path.join(WEBAPP, name), encoding="utf-8").read()]
+check(f"webapp/ 的 {len(module_files(WEBAPP))} 个模块都不 import streamlit",
+      web_offenders == [], repr(web_offenders))
 
 print()
 print("=" * 78)

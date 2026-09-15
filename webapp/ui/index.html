@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>科研文献 PDF 智能阅读器 · 网页版</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body class="h-normal">
+<div class="app">
+  <!-- ============ 左栏：功能控件 ============ -->
+  <aside class="side left" id="side-left">
+    <div class="brand"><span class="dot"></span>
+      <span>科研文献阅读器<small>网页版 · 自建界面</small></span>
+    </div>
+
+    <div class="group">
+      <input type="file" id="file-input" accept="application/pdf,.pdf" hidden>
+      <button class="tool" id="btn-upload">
+        <span class="ico">⬆</span>
+        <span>选择 PDF 文献<em id="upload-hint">支持单栏 / 双栏，点这里选文件</em></span>
+      </button>
+    </div>
+
+    <div class="group">
+      <div class="group-title">语言</div>
+      <div class="seg" id="lang-seg">
+        <button data-lang="zh" class="on">中文</button>
+        <button data-lang="en">English</button>
+      </div>
+      <div class="cache" id="translate-note"></div>
+    </div>
+
+    <div class="group">
+      <div class="group-title">阅读布局</div>
+      <div class="seg" id="height-seg">
+        <button data-h="compact">紧凑</button>
+        <button data-h="normal" class="on">标准</button>
+        <button data-h="loose">宽松</button>
+      </div>
+      <button class="tool small" id="btn-immersive" aria-pressed="false">⤢ 沉浸模式（隐藏两栏）</button>
+      <div class="cache">快捷键：<b>← →</b> 翻页 · <b>L</b> 中英 · <b>I</b> 沉浸 · <b>Esc</b> 关灯箱</div>
+    </div>
+
+    <div class="group grow">
+      <div class="group-title">章节导航</div>
+      <ol id="nav"></ol>
+    </div>
+
+    <div class="group">
+      <div class="group-title">处理状态</div>
+      <div class="cache" id="status">尚未选择文献。</div>
+    </div>
+  </aside>
+
+  <!-- ============ 中栏：卡片阅读区 ============ -->
+  <main class="stage">
+    <header class="stage-head">
+      <div class="doc-title" id="doc-title">科研文献 PDF 智能阅读器 · 网页版</div>
+      <div class="stage-tools">
+        <span class="pill" id="pill-cache">未打开文献</span>
+      </div>
+    </header>
+
+    <div class="deck-wrap" id="deck-wrap">
+      <button class="nav-btn" id="prev" aria-label="上一张">‹</button>
+      <div class="deck" id="deck">
+        <div class="empty" id="empty">
+          <h2>👈 先在左栏选择一篇 PDF</h2>
+          <p>打开后：正文按章节聚合成卡片 · 中英一键切换 · 公式与表格按原排版截图 ·
+             <b>整页固定、三块各自滚动</b> · 可按 <b>I</b> 进入沉浸模式。</p>
+        </div>
+      </div>
+      <button class="nav-btn" id="next" aria-label="下一张">›</button>
+      <div class="scroll-hint">↕ 卡内滚动</div>
+    </div>
+
+    <footer class="stage-foot">
+      <div class="dots" id="dots"></div>
+      <div class="counter" id="counter"></div>
+    </footer>
+  </main>
+
+  <!-- ============ 右栏：文献背景信息 ============ -->
+  <aside class="side right" id="side-right">
+    <div class="group">
+      <div class="group-title">文献元数据</div>
+      <div class="title" id="meta-title">—</div>
+      <dl id="meta-list"></dl>
+      <div class="cache" id="meta-note">本步先只读展示；可编辑与 GROBID 对照放在下一步。</div>
+    </div>
+    <div class="group">
+      <div class="group-title">概览</div>
+      <div id="overview"></div>
+    </div>
+    <div class="group">
+      <div class="group-title">本地缓存</div>
+      <div class="cache" id="cache-info">—</div>
+    </div>
+  </aside>
+</div>
+
+<!-- 图片放大（灯箱） -->
+<div class="lightbox" id="lightbox" aria-hidden="true">
+  <div class="lb-bar"><span id="lb-name"></span><button id="lb-close">✕ 关闭（Esc）</button></div>
+  <img id="lb-img" alt="">
+</div>
+
+<!-- 处理中遮罩 -->
+<div class="busy" id="busy">
+  <div class="busy-card"><b id="busy-title">正在处理文献…</b><span id="busy-sub">解析 → 提取图片 → 读元数据</span></div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

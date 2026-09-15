@@ -62,6 +62,39 @@ segemented-pdf-reader/
 混在解析器里会让 `pdf_parser.py` 难以维护；拆出来之后可以单独跑、单独验证。
 它不反向依赖 `pdf_parser`，只按鸭子类型读原子块的属性。
 
+## 阶段 7.1 说明：网页版（自建前端）——把界面换成我自己写的那套
+
+**为什么要换前端**：卡内滚动 / 固定页面 / 沉浸模式这三个界面需求，在 Streamlit 里两次尝试都失败
+（CSS 注入没生效；压列宽 hack 把界面弄乱，留档在 tag `v0.6.1-layout-broken`）。根因是
+**框架不让改它的布局**。而 `utils/` 从第一天就是"不依赖 Streamlit"的（架构守卫第 ⑨ 条守着这条），
+所以换前端是**换壳不换芯**。
+
+**架构**：`浏览器 ⇄ webapp/server.py（本地 HTTP 服务，只用标准库）⇄ utils/（引擎）`
+
+| 目录 | 内容 |
+| --- | --- |
+| `webapp/server.py` | 本地 HTTP 服务（`ThreadingHTTPServer`，**不新增任何依赖**）。接口：`/api/open`（传 PDF 字节）、`/api/img/<id>`（取图）、`/api/translate`、`/api/position`、`/api/status` |
+| `webapp/state.py` | 服务端"当前这篇文献"的会话状态（解析结果 + 图片登记表 + 翻译 + 阅读位置），带锁 |
+| `webapp/payload.py` | 把引擎结果整理成前端要的 JSON（纯逻辑，可离线单测） |
+| `webapp/ui/` | **前端三件套**：`index.html` / `app.css` / `app.js`（demo 那套做法的正式版） |
+| `启动网页版.bat` | 双击即用：起服务 + 自动开浏览器（端口 8765，与 Streamlit 版的 8501 互不干扰） |
+
+**两个需求在这里怎么实现**（都是自建前端才有资格做的事）：
+
+* 固定页面 + 三块卡内滚动：`html,body{height:100%;overflow:hidden}`，三块区域各自 `overflow-y:auto`
+  且都写 `min-height:0`（grid/flex 子项默认 `min-height:auto` 不会收缩——这正是"滚动条跑到整页上"的根因）；
+  高度用 `vh` 算，**不需要 Streamlit 版那种"像素档位"**；
+* 沉浸模式：给 `body` 加一个 class，`body.immersive .side{display:none}`——与 demo 完全同源；
+* 顺带白拿：键盘快捷键（← → / L / I / Esc）回来了、样式全在自己手里、交互不再触发"整脚本重跑"。
+
+**怎么验收**：`python tests/test_webapp_payload.py`（16 条，载荷层）+
+`.dsh-scratch\webapi_roundtrip.py`（**32 条端到端**：真起服务、真传 PDF、真取 PNG、真验翻译缓存与错误处理
+——这是自建前端最大的好处：**整条链路我能在没有浏览器的环境里自测**）；观感部分仍需你在浏览器里看一眼。
+
+**已知边界**：`webapp/` 目前只做了"读 + 翻译 + 图片 + 缓存 + 沉浸"这条主线；元数据**编辑**、GROBID 对照、
+解析诊断面板还没搬（下一步）。**Streamlit 版原样保留**（`启动阅读器.bat`），随时可用、随时对照，
+两个前端共用同一份 `.cache/`（译文与论文记录互通）。
+
 ## 阶段 6.4 说明：译文覆盖与「翻译整篇」（修用户实测报的「重开还要重翻」）
 
 **用户报的现象**（原话）：「我上传了一篇文献后加载了几张卡片后，我主动关闭了阅读器进程，
