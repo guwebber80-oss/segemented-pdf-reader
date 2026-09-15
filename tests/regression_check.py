@@ -58,7 +58,7 @@ PROJECT_SUITES = [
     ("4.4-B 修复：公式碎片堆种子 + 表注（28 条断言）", "test_formula_seeds.py"),
     ("标题/角色：DOI 不得当小标题（13 条断言）", "test_heading_roles.py"),
     ("阶段 5 架构守卫（10 条断言）", "test_architecture.py"),
-    ("阶段 5 界面面板冒烟（11 条断言）", "test_ui_panels.py"),
+    ("阶段 5 界面面板与放大弹层冒烟（14 条断言）", "test_ui_panels.py"),
 ]
 
 # 允许变化、不参与判定的字段

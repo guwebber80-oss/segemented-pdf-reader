@@ -135,38 +135,43 @@ def bound_names(node, into):
             into.add(child.arg)
 
 
-for folder in (UTILS, UI):
-    for name in module_files(folder):
-        path = os.path.join(folder, name)
-        tree = ast.parse(open(path, encoding="utf-8").read(), path)
-        module_bound = set()
-        bound_names(tree, module_bound)
-        for node in tree.body:
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            own = set()
-            bound_names(node, own)
-            loaded = {child.id for child in ast.walk(node)
-                      if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)}
-            missing = sorted(loaded - own - module_bound - BUILTINS)
-            if missing:
-                undefined.append(f"{name}::{node.name} 缺少 {missing}")
-        # 模块级代码也要查：实测漏过一次——ui/diagnostics.py 的 BACKGROUND_GROUPS
-        # 用到 6 个 ROLE_* 常量却没 import，结果**一 import 这个模块就崩**，
-        # 而只查函数体的检查完全看不见（模块级赋值不是 FunctionDef）。
-        module_loaded = {child.id for statement in tree.body
-                         if not isinstance(statement, ast.Assign)
-                         for child in ast.walk(statement)
-                         if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)}
-        for statement in tree.body:
-            if isinstance(statement, ast.Assign):
-                module_loaded |= {child.id for child in ast.walk(statement.value)
-                                  if isinstance(child, ast.Name)
-                                  and isinstance(child.ctx, ast.Load)}
-        module_missing = sorted(module_loaded - module_bound - BUILTINS)
-        if module_missing:
-            undefined.append(f"{name}::模块级 缺少 {module_missing}")
-check("ui/ 与 utils/ 的函数与模块级代码都没有未定义名", undefined == [], repr(undefined[:3]))
+TARGET_FILES = ([os.path.join(UTILS, name) for name in module_files(UTILS)]
+                + [os.path.join(UI, name) for name in module_files(UI)]
+                # app.py 也要查：实测给它加三栏布局时漏导入 is_formula_item /
+                # is_table_item / paragraph_formula_payload，只有真跑到那一段才会 NameError
+                + [os.path.join(PROJECT, "app.py")])
+
+for path in TARGET_FILES:
+    name = os.path.basename(path)
+    tree = ast.parse(open(path, encoding="utf-8").read(), path)
+    module_bound = set()
+    bound_names(tree, module_bound)
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        own = set()
+        bound_names(node, own)
+        loaded = {child.id for child in ast.walk(node)
+                  if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)}
+        missing = sorted(loaded - own - module_bound - BUILTINS)
+        if missing:
+            undefined.append(f"{name}::{node.name} 缺少 {missing}")
+    # 模块级代码也要查：实测漏过一次——ui/diagnostics.py 的 BACKGROUND_GROUPS
+    # 用到 6 个 ROLE_* 常量却没 import，结果**一 import 这个模块就崩**，
+    # 而只查函数体的检查完全看不见（模块级赋值不是 FunctionDef）。
+    module_loaded = {child.id for statement in tree.body
+                     if not isinstance(statement, ast.Assign)
+                     for child in ast.walk(statement)
+                     if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)}
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            module_loaded |= {child.id for child in ast.walk(statement.value)
+                              if isinstance(child, ast.Name)
+                              and isinstance(child.ctx, ast.Load)}
+    module_missing = sorted(module_loaded - module_bound - BUILTINS)
+    if module_missing:
+        undefined.append(f"{name}::模块级 缺少 {module_missing}")
+check("utils / ui / app.py 的函数与模块级代码都没有未定义名", undefined == [], repr(undefined[:3]))
 
 print()
 print("⑥ 语法与 AST 检查：所有模块都能解析（防止搬运时留下半截代码）")

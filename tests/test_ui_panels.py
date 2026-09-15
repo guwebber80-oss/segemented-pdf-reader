@@ -53,6 +53,9 @@ class _Stub:
     def __call__(self, *args, **kwargs):
         CALLS.append((self._name, args, kwargs))
         name = self._name.split(".")[-1]
+        if name == "dialog":
+            # st.dialog(...) 是装饰器：原样返回被装饰的函数，好让弹层函数体也能被测到
+            return lambda func: func
         if name == "columns":
             spec = args[0] if args else kwargs.get("spec", 1)
             count = spec if isinstance(spec, int) else len(spec)
@@ -193,6 +196,22 @@ check(f"假 st 记录到 {len(CALLS)} 次渲染/控件调用", len(CALLS) > 50, 
 called = {name.split(".")[-1] for name, _args, _kwargs in CALLS}
 for api in ("expander", "markdown", "text_input"):
     check(f"面板调用了 st.{api}", api in called, repr(sorted(called)[:8]))
+
+print()
+print("④ 插图与区域截图的放大弹层（阶段 5.3 新增：卡片后插图 / 公式表格都能点开放大）")
+if not image_data["images"]:
+    print("  [跳过] 这份样本没有可放大的插图")
+else:
+    first_image = image_data["images"][0]
+    run("render_figure（卡片后插图 + 放大按钮）", media.render_figure,
+        first_image, pdf_bytes, "test")
+    run("figure_dialog（插图弹层，width=large）", media.figure_dialog, pdf_bytes, first_image)
+if not table_regions:
+    print("  [跳过] 这份样本没有表格区域")
+else:
+    payload = {"page": table_regions[0].page, "rect": table_regions[0].rect,
+               "text": table_regions[0].text, "caption": table_regions[0].caption}
+    run("region_dialog（公式/表格区域弹层）", media.region_dialog, pdf_bytes, payload)
 
 print()
 print("=" * 78)

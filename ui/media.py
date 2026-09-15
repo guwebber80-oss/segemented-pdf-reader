@@ -44,10 +44,62 @@ def get_formula_image(pdf_bytes: bytes, formula: dict):
     return cache[key]
 
 
-def render_formula(payload: dict, pdf_bytes: bytes) -> None:
-    """渲染一个公式段落（失败时降级显示线性文本，不让卡片崩掉）"""
+def _zoom_key(prefix: str, payload: dict) -> str:
+    """给「放大」按钮生成稳定的 key（同一区域只渲染一张图，key 必须唯一）"""
+    rect = payload.get("rect") or (0, 0, 0, 0)
+    return f"zoom_{prefix}_{payload.get('page', 0)}_{int(rect[0])}_{int(rect[1])}"
+
+
+@st.dialog("区域截图", width="large")
+def region_dialog(pdf_bytes: bytes, payload: dict) -> None:
+    """
+    点「放大」后弹出的原尺寸截图（Streamlit 原生弹层，对应 demo 里的灯箱）。
+
+    为什么需要放大：公式的上下标、表格里的小字号，在卡片宽度里往往看不清；
+    截图是 200dpi 渲染的，放大后仍然清晰。
+    """
     try:
         st.image(get_formula_image(pdf_bytes, payload), width="content")
+    except Exception as exc:                      # pragma: no cover
+        st.error(f"图片渲染失败（{type(exc).__name__}）：{exc}")
+    caption = (payload.get("caption") or "").strip()
+    st.caption(("表格区域" if caption else "公式区域")
+               + f" · 原文第 {payload.get('page', '?')} 页 · 原文截图"
+               + (f"（{caption[:80]}）" if caption else ""))
+
+
+@st.dialog("文献图片", width="large")
+def figure_dialog(pdf_bytes: bytes, image_item) -> None:
+    """文献插图的原尺寸弹层（对应卡片后插图上的「放大」按钮）"""
+    try:
+        st.image(get_full_image(pdf_bytes, image_item), width="content")
+    except Exception as exc:                      # pragma: no cover
+        st.error(f"图片渲染失败（{type(exc).__name__}）：{exc}")
+    assoc = f"关联卡片 #{image_item.card_order}" if image_item.card_order else "未关联卡片"
+    st.caption(f"第 {image_item.page} 页 · 原始 {image_item.pixel_w}×{image_item.pixel_h} px · "
+               f"页面上显示尺寸 {image_item.disp_w:.0f}×{image_item.disp_h:.0f} pt · {assoc}")
+
+
+def render_figure(image_item, pdf_bytes: bytes, key_prefix: str = "fig") -> None:
+    """
+    渲染一张**文献插图**（卡片后面那一张）+ 「放大」按钮。
+
+    用户要求「图片放在对应位置的文本卡片后」，所以插图跟着卡片走，
+    不再只放在侧边栏画廊里；点「放大」弹原生弹层看原尺寸。
+    """
+    st.image(image_item.thumb, width="stretch")
+    assoc = f"关联卡片 #{image_item.card_order}" if image_item.card_order else "未关联卡片"
+    st.caption(f"第 {image_item.page} 页 · {image_item.pixel_w}×{image_item.pixel_h} px · {assoc}")
+    if st.button("🔍 点击放大", key=f"{key_prefix}_{image_item.key}", width="stretch"):
+        figure_dialog(pdf_bytes, image_item)
+
+
+def render_formula(payload: dict, pdf_bytes: bytes) -> None:
+    """渲染一个公式段落（失败时降级显示线性文本，不让卡片崩掉）+ 放大按钮"""
+    try:
+        st.image(get_formula_image(pdf_bytes, payload), width="content")
+        if st.button("🔍 放大", key=_zoom_key("formula", payload)):
+            region_dialog(pdf_bytes, payload)
     except Exception as exc:
         st.caption(f"公式图片渲染失败（{type(exc).__name__}），下面是线性文本：")
         st.markdown(escape_markdown(payload["text"]))
@@ -80,6 +132,8 @@ def render_table(payload: dict, pdf_bytes: bytes) -> None:
         caption = (payload.get("caption") or "").strip()
         st.caption("表格区域：原文截图，不参与翻译"
                    + (f"（{caption[:70]}）" if caption else "") + "。")
+        if st.button("🔍 放大", key=_zoom_key("table", payload)):
+            region_dialog(pdf_bytes, payload)
     except Exception as exc:
         st.caption(f"表格图片渲染失败（{type(exc).__name__}），下面是原文字：")
         st.markdown(escape_markdown(payload["text"]))
