@@ -22,12 +22,8 @@ from utils.image_extractor import (
     ASSOC_MAX_GAP,
     associate_with_cards,
     extract_images,
-    render_full_image,
-    render_region_image,
 )
 from utils.metadata import extract_metadata
-from utils import metadata_compare
-from utils import grobid_client
 from utils.pdf_parser import (
     ROLE_AUTHOR,
     ROLE_COPYRIGHT,
@@ -47,7 +43,6 @@ from utils.translator import (
     backend_availability,
     load_config,
     probe_backend,
-    translate,
     translate_many,
 )
 from ui.cards import (
@@ -58,6 +53,8 @@ from ui.cards import (
     render_language_toggle,
     translate_cached,
 )
+from ui.diagnostics import render_background_panel, render_diagnostics
+from ui.metadata_panel import render_grobid_panel, render_metadata_panel
 from ui.media import (
     get_full_image,
     is_formula_item,
@@ -335,223 +332,16 @@ if st.session_state.get("meta_key") != meta_key:
 metadata = st.session_state["metadata"]
 
 
-def metadata_input(label: str, widget_key: str, meta_field, is_long: bool = False,
-                   height: int = 170):
-    """
-    一个可编辑的元数据字段 + 它下方的来源说明。
-
-    输入框的值存在 session_state 里，所以用户的修改会跨重跑保留下来，
-    不会被 Streamlit 的「每次交互重跑整个脚本」冲掉。
-    """
-    if widget_key not in st.session_state:
-        st.session_state[widget_key] = meta_field.value
-
-    if meta_field.found:
-        if is_long:
-            st.text_area(label, key=widget_key, height=height)
-        else:
-            st.text_input(label, key=widget_key)
-        caption = f"来源：{meta_field.source}"
-        if meta_field.note:
-            caption += f"　⚠️ {meta_field.note}"
-        st.caption(caption)
-    else:
-        if is_long:
-            st.text_area(f"{label}（未找到，请手动输入）", key=widget_key, height=height)
-        else:
-            st.text_input(f"{label}（未找到，请手动输入）", key=widget_key)
-        st.caption(f"⚠️ {meta_field.note or '自动提取失败，请手动填写'}")
 
 
-st.subheader("📋 文献元数据")
-
-head_left, head_right = st.columns([4, 1])
-with head_left:
-    st.caption(
-        "自动提取只是**候选值**。科研场景下准确性优先于自动化——"
-        "请核对后直接修改，改动立即生效。"
-    )
-with head_right:
-    if st.button("↺ 用自动提取结果覆盖", help="把手动修改过的内容还原成程序提取的值"):
-        st.session_state["in_title"] = metadata.title.value
-        st.session_state["in_doi"] = metadata.doi.value
-        st.session_state["in_abstract"] = metadata.abstract.value
-        st.session_state["in_authors"] = metadata.authors.value
-        st.session_state["in_first_author"] = metadata.first_author.value
-        st.session_state["in_corresponding"] = metadata.corresponding_author.value
-        st.session_state["in_corresponding_email"] = metadata.corresponding_email.value
-        st.session_state["in_affiliations"] = metadata.affiliations.value
-        st.session_state["in_supplementary"] = metadata.supplementary_links.value
-        st.session_state["in_author_emails"] = metadata.author_emails.value
-        st.rerun()
-
-if st.session_state.get("meta_error"):
-    st.error("元数据提取失败：" + st.session_state["meta_error"])
-
-col_title, col_doi = st.columns([2, 1])
-with col_title:
-    metadata_input("标题", "in_title", metadata.title)
-with col_doi:
-    metadata_input("DOI", "in_doi", metadata.doi)
-
-metadata_input("摘要", "in_abstract", metadata.abstract, is_long=True)
-
-# ---- 阶段 4.2：作者 / 单位 / 通讯作者 / 附件链接 ----
-st.markdown("##### 👥 作者与单位")
-
-col_first, col_corr, col_mail = st.columns([1, 1, 1])
-with col_first:
-    metadata_input("第一作者", "in_first_author", metadata.first_author)
-with col_corr:
-    metadata_input("通讯作者", "in_corresponding", metadata.corresponding_author)
-with col_mail:
-    metadata_input("通讯邮箱", "in_corresponding_email", metadata.corresponding_email)
-
-metadata_input("作者列表（每行一位，保持原文顺序）", "in_authors", metadata.authors,
-               is_long=True, height=130)
-metadata_input("作者单位（每行一个，保留原文编号）", "in_affiliations", metadata.affiliations,
-               is_long=True, height=130)
-
-with st.expander("📧 作者邮箱（逐作者列出，ACM 等排版常见）", expanded=False):
-    metadata_input("作者邮箱", "in_author_emails", metadata.author_emails,
-                   is_long=True, height=110)
-
-st.markdown("##### 📎 补充材料 / 数据链接")
-metadata_input("附件链接（每行一个 URL）", "in_supplementary",
-               metadata.supplementary_links, is_long=True, height=90)
-if metadata.supplementary_items:
-    for item in metadata.supplementary_items:
-        st.markdown(f"- **{item['类型']}**（第 {item['页码']} 页）："
-                    f"[{item['链接']}]({item['链接']})　"
-                    f"<span style='color:#888'>依据：{escape_markdown(item['上下文'][:70])}</span>",
-                    unsafe_allow_html=True)
-    st.caption("上面的分类是按链接域名与上下文关键词判的，可能有偏差；"
-               "链接本身都是从 PDF 的链接注释或正文里抓出来的，可以直接点开核对。")
-
+render_metadata_panel(metadata)
 # ============================================================
 # 第 4.7 部分：GROBID 交叉校验（阶段 4.3）
 # ============================================================
 # 思路：本地规则（版面启发式）与 GROBID（CRF 模型）各抽一遍，逐字段对照。
 # 两边一致 → 可信度大增；不一致 → 并排显示，由用户决定采信谁（一键写回上面的输入框）。
 # GROBID 不提供通讯作者与附件链接，界面上如实标注，不显示成「不一致」误导用户。
-GROBID_BASE_URL = os.environ.get("GROBID_URL", grobid_client.DEFAULT_BASE_URL)
-
-
-def grobid_status(force: bool = False):
-    """探测 GROBID 服务（结果缓存在会话里，避免每次交互都等网络超时）"""
-    if force or "grobid_alive" not in st.session_state:
-        alive, message = grobid_client.is_alive(GROBID_BASE_URL)
-        st.session_state["grobid_alive"] = alive
-        st.session_state["grobid_message"] = message
-        st.session_state["grobid_version"] = grobid_client.server_version(GROBID_BASE_URL) \
-            if alive else ""
-    return st.session_state["grobid_alive"], st.session_state["grobid_message"]
-
-
-st.markdown("##### 🔍 GROBID 交叉校验")
-st.caption(
-    "GROBID 是专门抽取论文头部信息的外部模型，这里把它当作**第二意见**："
-    "两边结果一致说明可信度高；不一致时并排显示，你可以逐字段决定采信谁。"
-    "它**不提供**通讯作者与附件链接（界面上会如实标注）。"
-)
-
-grobid_alive, grobid_message = grobid_status()
-
-if not grobid_alive:
-    st.info(
-        f"{grobid_message}\n\n"
-        "需要时用这条命令启动（保持窗口开着即可）：\n"
-        "```\ndocker run --rm --init --ulimit core=0 -p 8070:8070 grobid/grobid:0.9.1-crf\n```\n"
-        "没启动也**不影响任何阅读功能**——上面的字段仍然是本地规则的结果。"
-    )
-else:
-    if st.session_state.get("grobid_key") != meta_key:
-        # 换文件：清掉上一个文件的校验结果，并重新采一次（服务已在则自动跑）
-        for key in ("grobid_result", "grobid_error", "grobid_error_detail"):
-            st.session_state.pop(key, None)
-        st.session_state["grobid_key"] = meta_key
-
-    col_run, col_ver = st.columns([3, 2])
-    with col_run:
-        run_clicked = st.button("🔍 运行 GROBID 校验", key="grobid_run")
-    with col_ver:
-        st.caption(f"服务：{grobid_message}"
-                   + (f" · 版本 {st.session_state.get('grobid_version', '')[:32]}"
-                      if st.session_state.get("grobid_version") else ""))
-
-    if (run_clicked or "grobid_result" not in st.session_state) \
-            and not st.session_state.get("grobid_error_detail"):
-        with st.spinner("正在调用 GROBID 抽取头部信息（首次约 5~10 秒）…"):
-            try:
-                st.session_state["grobid_result"] = grobid_client.header_from_pdf(
-                    pdf_bytes, base_url=GROBID_BASE_URL, filename=uploaded_file.name)
-                st.session_state["grobid_error"] = None
-            except grobid_client.GrobidError as exc:
-                st.session_state["grobid_result"] = None
-                st.session_state["grobid_error"] = str(exc)
-            except Exception as exc:                     # 兜底：任何异常都不能打断阅读
-                st.session_state["grobid_result"] = None
-                st.session_state["grobid_error"] = f"{type(exc).__name__}: {exc}"
-
-    grobid_result = st.session_state.get("grobid_result")
-
-    if st.session_state.get("grobid_error"):
-        st.warning("GROBID 调用失败：" + st.session_state["grobid_error"])
-    elif grobid_result:
-        st.caption(grobid_client.summarize(grobid_result))
-
-        rows = metadata_compare.build_comparison(metadata, grobid_result)
-        st.dataframe([{"字段": row["字段"], "本地规则": row["本地"],
-                       "GROBID": row["GROBID"], "结论": row["结论"]}
-                      for row in rows], hide_index=True, height=260)
-
-        actionable = [row for row in rows if row["可采信"]]
-        if actionable:
-            st.markdown("**一键采信**（写回上面的输入框，可再手动修改）")
-
-            # 注意：这里必须用**回调**而不是就地赋值。
-            # Streamlit 不允许在控件实例化之后再改它的 session_state，
-            # 而本面板位于输入框下方；回调在脚本重跑之前执行，因此不受此限制。
-            def take_grobid_scalar(target_key: str, value: str):
-                st.session_state[target_key] = value
-
-            def take_grobid_list(target_key: str, items: list):
-                current = st.session_state.get(target_key, "")
-                merged, added = metadata_compare.merge_missing(current, items)
-                if added:
-                    st.session_state[target_key] = merged
-                    st.session_state["grobid_take_note"] = (
-                        f"已补进 {len(added)} 条：{'、'.join(str(x)[:24] for x in added[:3])}"
-                        + ("…" if len(added) > 3 else ""))
-
-            for index, row in enumerate(actionable):
-                name = row["字段"]
-                if row["类型"] == "list":
-                    label = f"用 GROBID 补进 {len(row['新增'])} 条{name}"
-                    st.button(label, key=f"grobid_take_{index}_{row['字段键']}",
-                              on_click=take_grobid_list,
-                              args=(row["会话键"], row["新增"]))
-                else:
-                    label = f"采信 GROBID 的{name}"
-                    st.button(label, key=f"grobid_take_{index}_{row['字段键']}",
-                              on_click=take_grobid_scalar,
-                              args=(row["会话键"], row.get("GROBID原始", row["GROBID"])))
-
-            if st.session_state.get("grobid_take_note"):
-                st.success(st.session_state.pop("grobid_take_note"))
-            st.caption("列表字段采用**只补空、不覆盖**：GROBID 独有的条目追加进去，"
-                       "已有的保持本地版本，不会把本地的结果冲掉。"
-                       "想整段换成 GROBID 的结果，可以直接在输入框里手动替换。")
-        else:
-            st.success("所有可比字段两边一致，无需人工介入。")
-
-        st.caption(
-            "⚠️ GROBID 也会出错，实测过的例子：Nature 那篇**标题被抽成期刊名**"
-            "「nature human behaviour」；SAGE 那篇把题记里的「George Washington」当成作者；"
-            "Frontiers 那篇把侧栏的**编者与审稿人**当成作者；Cell Press 那篇的摘要"
-            "（叫 SUMMARY）**一条都没抽到**。所以不一致时请对照原 PDF 判断，不要盲信任何一边。"
-        )
-
+render_grobid_panel(meta_key, metadata, pdf_bytes, uploaded_file)
 st.divider()
 
 # ============================================================
@@ -635,7 +425,6 @@ st.caption(
     "**公式与表格仍以原图呈现**。表格也可以用侧边栏「表格呈现 → 保留文字」切回线性文字。"
 )
 
-_COLUMN_NAME = {-1: "通栏", 0: "左栏", 1: "右栏"}
 
 
 
@@ -725,182 +514,15 @@ st.divider()
 # ============================================================
 # 第 6.5 部分：论文背景信息（已从阅读卡片里移出的内容）
 # ============================================================
-BACKGROUND_GROUPS = [
-    ("✍️ 作者与单位", (ROLE_AUTHOR, ROLE_FRONT_MATTER),
-     "作者名、单位、联系方式，以及封面页上的 Highlights / In Brief 等导读内容"),
-    ("📰 期刊信息与栏目", (ROLE_COPYRIGHT, ROLE_LABEL),
-     "期刊名与栏目名（Report / Highlights / CCS Concepts…）、版权与许可声明、资助信息、"
-     "以及图内的面板标签"),
-    ("📚 参考文献", (ROLE_REFERENCE,), "参考文献列表（保持原文顺序）"),
-    ("📄 页眉页脚", (ROLE_HEADER_FOOTER,), "每页重复出现的 running head、页码、页脚"),
-]
 
-st.subheader("📎 论文背景信息")
-st.caption(
-    f"下面 {len(background_blocks)} 段**不属于正文**，所以没有进阅读卡片。"
-    "如果发现哪一段其实是正文，打开侧边栏的「显示全部内容」就能把它找出来。"
-)
-
-for group_title, group_roles, group_hint in BACKGROUND_GROUPS:
-    group_items = [b for b in background_blocks if b.role in group_roles]
-    if not group_items:
-        continue
-    with st.expander(f"{group_title}（{len(group_items)} 段）", expanded=False):
-        st.caption(group_hint)
-        for b in group_items:
-            text = b.text.strip().replace("\n", " ")
-            if len(text) > 400:
-                text = text[:400] + "…"
-            st.markdown(f"- 第 {b.page} 页 · {escape_markdown(text)}")
-
+render_background_panel(background_blocks)
 st.divider()
 
 # ============================================================
 # 第 7 部分：诊断面板（验证阅读顺序、定位双栏错位）
 # ============================================================
-with st.expander("🔍 解析诊断（验证阅读顺序、定位双栏错位）"):
-    st.markdown("**⓪ 内容角色统计**（正文与图注进阅读卡片，其余归入「论文背景信息」）")
-    st.dataframe([{
-        "角色": ROLE_NAMES.get(role, role),
-        "块数": count,
-        "去向": "进卡片流" if role in ("body", "caption", "heading") else "→ 背景信息",
-    } for role, count in sorted(result["roles"].items(), key=lambda kv: -kv[1])],
-        hide_index=True)
-
-    st.markdown("**① 每页排版检测**")
-    st.dataframe(pages, hide_index=True)
-
-    st.markdown("**② 段落明细**（已按程序认定的阅读顺序编号，从上往下就是卡片顺序）")
-    rows = [{
-        "序号": b.order,
-        "页码": b.page,
-        "类型": "标题" if b.kind == "heading" else "正文",
-        "角色": ROLE_NAMES.get(b.role, b.role),
-        "栏": _COLUMN_NAME[b.column],
-        "y0": round(b.y0, 1),
-        "x0": round(b.x0, 1),
-        "字号": round(b.max_size, 1),
-        "粗体占比": round(b.bold_ratio, 2),
-        "词数": count_words(b.text),
-        "拼了块": len(getattr(b, "atom_indices", []) or []),
-        "公式": b.formula_tier or ("簇%d" % b.cluster_id if b.cluster_id >= 0 else "-"),
-        "开头 40 字": b.text[:40].replace("\n", " "),
-    } for b in paragraphs]
-    st.dataframe(rows, hide_index=True, height=420)
-
-    # 双栏页里，正常只有标题/摘要/跨栏图注会横跨中缝。
-    # 如果这里出现大段正文，说明分栏判断可能出错，需要人工核对。
-    spanning = [b for b in paragraphs
-                if b.column == -1 and b.kind == "body" and count_words(b.text) > 120]
-    if spanning:
-        st.markdown("**③ 疑似问题：跨栏的长正文块**（双栏页里出现这些，说明分栏可能有误）")
-        for b in spanning:
-            st.write(f"#{b.order} 第{b.page}页 · {count_words(b.text)} 词 · {b.text[:60]}…")
-    else:
-        st.success("③ 未发现异常：没有「跨栏的长正文块」。")
-
-    st.caption(
-        "自查方法：看 ① 表的「检测排版」是否与你的 PDF 相符，"
-        "再对照片子里的正文，看 ② 表的顺序是不是「先把左栏读完，再读右栏」。"
-    )
-
-    st.markdown("**④ 图片与卡片的关联情况**")
-    if not images:
-        st.caption("这个 PDF 没有提取到位图插画（矢量图不算）。")
-    else:
-        st.write(
-            f"共 {len(images)} 张 · 可靠关联 **{association['关联可靠']}** 张 · "
-            f"存疑 {association['关联存疑']} 张 · 未关联 {association['未关联']} 张"
-        )
-        problems = association["未关联列表"] + association["存疑列表"]
-        if problems:
-            st.markdown(
-                f"下面 **{len(problems)}** 张没能可靠关联到文本卡片"
-                "（关联方式：取同页距离最近的文本块；距离超过 "
-                f"{ASSOC_MAX_GAP:.0f}pt 或同页无文本就算不可靠）："
-            )
-            st.dataframe([{
-                "图片": img.key,
-                "页码": img.page,
-                "位置": f"({img.bbox[0]:.0f}, {img.bbox[1]:.0f})",
-                "与最近卡片距离": f"{img.gap} pt" if img.gap >= 0 else "同页没有文本块",
-            } for img in problems], hide_index=True)
-        else:
-            st.success("所有图片都关联到了文本卡片。")
-
-    if image_result["skipped"]:
-        st.markdown(f"**⑤ 被跳过的图片（{len(image_result['skipped'])} 张）**")
-        st.dataframe(image_result["skipped"], hide_index=True)
-
-    st.markdown("**⑥ 元数据提取详情**（自动提取的原始值与来源，方便对照你在上面改过的内容）")
-    st.dataframe([{
-        "字段": name,
-        "来源": meta_field.source,
-        "自动提取值": (meta_field.value[:70] + "…") if len(meta_field.value) > 70 else meta_field.value,
-        "备注": meta_field.note,
-    } for name, meta_field in [("标题", metadata.title),
-                               ("DOI", metadata.doi),
-                               ("摘要", metadata.abstract),
-                               ("作者列表", metadata.authors),
-                               ("第一作者", metadata.first_author),
-                               ("通讯作者", metadata.corresponding_author),
-                               ("通讯邮箱", metadata.corresponding_email),
-                               ("作者单位", metadata.affiliations),
-                               ("作者邮箱", metadata.author_emails),
-                               ("附件链接", metadata.supplementary_links)]], hide_index=True)
-    if metadata.title.alternatives:
-        st.caption(f"标题备选（来自 PDF 内嵌元数据，可自行取舍）：{metadata.title.alternatives}")
-    if metadata.supplementary_items:
-        st.markdown("**⑥-2 附件链接的证据**（页码 + 抓取依据）")
-        st.dataframe(metadata.supplementary_items, hide_index=True)
-
-    st.markdown(f"**⑦ 公式区域明细（{len(clusters)} 个）**"
-                "——每个区域渲染成一张图，右边列出被合进来的块，方便核对有没有合错")
-    if not clusters:
-        st.caption("这个 PDF 没有识别到数学公式区域（正文里的行内统计量仍以文字呈现）。")
-    else:
-        block_by_order = {b.order: b for b in blocks}
-        st.dataframe([{
-            "区域": f"#{cluster.cluster_id}",
-            "页码": cluster.page,
-            "类型": "算法清单" if cluster.kind == "listing" else "公式",
-            "成员块数": cluster.member_count,
-            "区域范围": f"({cluster.rect[0]:.0f}, {cluster.rect[1]:.0f})"
-                        f"–({cluster.rect[2]:.0f}, {cluster.rect[3]:.0f})",
-            "成员块（#阅读顺序号:文本）": " | ".join(
-                f"#{block_by_order[i].order}:{block_by_order[i].text.strip()[:22]}"
-                for i in cluster.atom_indices if i in block_by_order),
-        } for cluster in clusters], hide_index=True)
-        st.caption(
-            "核对方法：区域范围应当刚好框住一处公式；成员块里如果混进了正文句子，"
-            "把这一页的截图和一个具体例子发给我，我按这个明细来调。"
-        )
-
-    st.markdown(f"**⑧ 表格区域明细（{len(table_regions)} 个）**"
-                "——每张表整块截图；判据是「题注锚点 + ≥3 列 × ≥3 行的对齐网格」")
-    if not table_regions:
-        st.caption("这个 PDF 没有识别到表格区域"
-                   "（2 列表格、跨页续表按设计不判；可用侧边栏「表格呈现 → 保留文字」对照）。")
-    else:
-        block_by_order = {b.order: b for b in blocks}
-        st.dataframe([{
-            "区域": f"T{region.region_id}",
-            "页码": region.page,
-            "判据": "题注" if region.kind == "captioned" else "几何兜底（无题注）",
-            "行×列": f"{region.rows} × {region.columns}",
-            "表注行": region.notes,
-            "区域范围": f"({region.rect[0]:.0f}, {region.rect[1]:.0f})"
-                        f"–({region.rect[2]:.0f}, {region.rect[3]:.0f})",
-            "题注": region.caption[:40],
-            "成员块（#阅读顺序号:文本）": " | ".join(
-                f"#{block_by_order[i].order}:{block_by_order[i].text.strip()[:18]}"
-                for i in region.atom_indices if i in block_by_order),
-        } for region in table_regions], hide_index=True)
-        st.caption(
-            "核对方法：截图应当刚好框住「题注 + 表格本体」；如果框进了正文段、"
-            "或者漏掉了某张表，把那一页截图发我，我按这个明细调判据。"
-        )
-
+render_diagnostics(ASSOC_MAX_GAP, association, blocks, clusters, image_result, images,
+                   metadata, pages, paragraphs, result, table_regions)
 # ============================================================
 # 第 8 部分：卡片全部渲染完之后，把翻译计数填进侧边栏的占位符
 # ============================================================
