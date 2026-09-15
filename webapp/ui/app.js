@@ -245,7 +245,14 @@ function renderCache(cache) {
 
 /* 译文覆盖度：告诉用户"断网前还差多少"，并给一个一次补齐的入口 */
 async function refreshCoverage() {
-  if (!state.paper) { $('coverage').textContent = '未打开文献。'; return; }
+  const button = $('btn-translate-all');
+  if (!state.paper) {
+    $('coverage').textContent = '未打开文献。';
+    button.textContent = '🌐 请先选择一篇文献';
+    button.disabled = true;
+    button.title = '选择 PDF 之后这里可以一次性把整篇补齐';
+    return;
+  }
   try {
     const status = await api('/api/status');
     const cov = status.coverage || {};
@@ -256,22 +263,47 @@ async function refreshCoverage() {
       + `段落 <b>${cov.covered_texts || 0} / ${cov.texts || 0}</b> 段`
       + (pending ? `<br>还有 <b>${pending}</b> 段没有译文（没翻到的卡片不会自动翻译）。`
                  : '<br>整篇都有译文了：断网也能看中文。');
-    $('btn-translate-all').textContent = pending
-      ? `🌐 翻译整篇（补齐 ${pending} 段）` : '🌐 整篇都译好了';
-    $('btn-translate-all').disabled = !pending;
-    if (!status.backend) $('coverage-note').textContent = '⚠️ 没有可用的翻译后端（请在 .env 里配置 Key）。';
-  } catch (e) { /* 状态拿不到就不显示，不影响阅读 */ }
+    // ⚠️ 这里**不能因为"待译 0 段"就把按钮禁用**：用户看到的是"点不动"，会以为坏了。
+    // 只有"没有文献 / 没有后端"才禁用（并且文案说明原因）；"已译好"时保持可点，点了就复查一次。
+    if (!status.backend) {
+      button.textContent = '⚠️ 没有可用的翻译后端';
+      button.disabled = true;
+      button.title = '请在项目根目录的 .env 里配置翻译 API Key，然后重启服务';
+      $('coverage-note').textContent = '⚠️ 没有可用的翻译后端（请在 .env 里配置 Key）。';
+      return;
+    }
+    button.textContent = pending
+      ? `🌐 翻译整篇（补齐 ${pending} 段）`
+      : '✅ 整篇都已译好（点一次复查）';
+    button.disabled = false;
+    button.title = pending
+      ? `把剩下 ${pending} 段一次翻完并存入本地缓存；已译过的段落不会重复请求`
+      : '已经整篇都有译文；点一下可以重新核对覆盖度';
+    $('coverage-note').textContent = pending
+      ? '平时是「读到哪翻到哪」：没翻到的卡片不会自动翻译。断网前点一次「翻译整篇」就能把整篇补齐。'
+      : '整篇都有译文了：断网也能看中文。';
+  } catch (e) {
+    // 状态拿不到时也**不禁用**，让用户还能点一下试试（点了会给出真实错误）
+    button.disabled = false;
+    $('coverage-note').textContent = '拿不到覆盖度（状态接口异常）：仍可点按钮试一次。';
+  }
 }
 
 /* 翻译整篇：取待译清单 → 分批调用 /api/translate → 进度条推进；已译段落不会重复请求 */
 async function translateAll() {
   const button = $('btn-translate-all');
+  const original = button.textContent;
   button.disabled = true;
+  button.textContent = '⏳ 正在处理…';
   try {
     const pending = await api('/api/pending');
     if (!pending.ok) { alert(pending.error || '没有可用的翻译后端'); return; }
     const texts = pending.texts || [];
-    if (!texts.length) { await refreshCoverage(); return; }
+    if (!texts.length) {
+      // 已经全部有译文：明确告诉用户"不用翻"，而不是让按钮灰着不出声
+      $('coverage-note').textContent = '✅ 整篇都已经有译文了，无需翻译（这次检查没有发现缺段）。';
+      return;
+    }
     const chunk = 20;
     let done = 0;
     for (let start = 0; start < texts.length; start += chunk) {
@@ -291,6 +323,7 @@ async function translateAll() {
     await refreshCoverage();
   } catch (err) {
     alert('翻译整篇失败：' + err.message);
+    button.textContent = original;
   } finally {
     button.disabled = false;
     setTimeout(() => { $('cov-bar').style.width = '0%'; }, 1200);

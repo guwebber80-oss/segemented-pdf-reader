@@ -95,6 +95,9 @@ body.immersive .stage-tools{margin-left:auto}
   color:var(--ink-2);font-size:12.5px;white-space:nowrap}
 .hbtn:hover{border-color:var(--accent);color:var(--accent)}
 .hbtn.on{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+/* 禁用态要"看得出是故意的"：降低不透明度 + 禁止手型光标 + 附 cursor 提示（否则像坏了） */
+.hbtn:disabled{opacity:.55;cursor:not-allowed;border-style:dashed}
+.hbtn:disabled:hover{border-color:var(--line);color:var(--ink-2)}
 .seg.mini{border-radius:9px;flex:0 0 auto}
 .seg.mini button{padding:5px 10px;font-size:12.5px;flex:0 0 auto}
 .pill{font-size:12px;color:var(--ink-2);border:1px solid var(--line);background:#fff;
