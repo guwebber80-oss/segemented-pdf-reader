@@ -35,6 +35,7 @@ if PROJECT_ROOT not in sys.path:
 from utils import store                                    # noqa: E402
 from utils.translator import load_config, backend_availability   # noqa: E402
 
+from . import payload as payload_module                     # noqa: E402
 from .state import STATE                                   # noqa: E402
 
 UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
@@ -145,6 +146,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_metadata_reset()
             if path == "/api/cache/clear":
                 return self._api_cache_clear()
+            if path == "/api/reparse":
+                return self._api_reparse()
         except ValueError as exc:                       # 预期内的输入问题
             return self._send_error_json(str(exc), code=400)
         except Exception as exc:                        # 兜底：任何异常都别让服务崩掉
@@ -169,6 +172,27 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_error_json("取不到这张图（可能换了一篇文献）", code=404)
         self._send(200, blob, "image/png", {"Cache-Control": "public, max-age=600"})
 
+    def _api_reparse(self):
+        """用当前（或新传入的）设置重新解析**同一篇**文献——不用重新上传文件"""
+        if STATE.pdf_bytes is None:
+            return self._send_error_json("还没有打开文献", code=400)
+        body = self._read_json()
+        settings = STATE.settings
+        if isinstance(body.get("settings"), dict):
+            settings = {**settings, **body["settings"]}
+        started = time.time()
+        data = STATE.open(STATE.pdf_bytes, STATE.file_name,
+                          merge_on=settings.get("merge_on", True),
+                          dehyphenate=settings.get("dehyphenate_on", True),
+                          target_words=settings.get("target_words", 200),
+                          table_mode=settings.get("table_mode", "image"),
+                          show_all=settings.get("show_all", False))
+        data["backend"] = current_backend()
+        data["elapsed_total"] = round(time.time() - started, 2)
+        print(f"  重新解析：{STATE.file_name} · 卡片 {len(data.get('cards') or [])} 张 · "
+              f"用时 {data['elapsed_total']}s")
+        self._send_json(data)
+
     def _api_pending(self):
         """整篇翻译用的待译清单（前端分批调用 /api/translate，自带进度）"""
         backend = current_backend()
@@ -178,14 +202,44 @@ class Handler(BaseHTTPRequestHandler):
         texts = STATE.pending_texts(backend, "zh")
         self._send_json({"ok": True, "texts": texts, "count": len(texts), "backend": backend})
 
+    @staticmethod
+    def _parse_settings(query: dict) -> dict:
+        """从查询串解析解析设置（PDF 本体占满请求体，所以设置只能走 URL）"""
+        def flag(name, default):
+            raw = (query.get(name) or [""])[0]
+            return default if raw == "" else raw not in ("0", "false", "False")
+
+        def number(name, default):
+            try:
+                return int((query.get(name) or [str(default)])[0])
+            except ValueError:
+                return default
+
+        # 统一交给 payload.settings_payload 规范化（字段名与 Streamlit 版一致），
+        # 这样 `state.open()` 拿到的一定是它认识的键（早先直接把 table_mode_label 传进去，
+        # 触发 TypeError → /api/open 500，是端到端测试抓出来的）
+        return payload_module.settings_payload({
+            "merge_on": flag("merge", True),
+            "dehyphenate_on": flag("dehyphenate", True),
+            "target_words": number("words", 200),
+            "table_mode_label": (query.get("table") or ["截图（推荐）"])[0],
+            "show_all": flag("show_all", False),
+        })
+
     def _api_open(self):
         pdf = self._read_body()
         if not pdf[:5].startswith(b"%PDF"):
             return self._send_error_json("这不是一个 PDF 文件（缺少 %PDF 头）", code=400)
         file_name = self.headers.get("X-Filename") or "文献.pdf"
         file_name = unquote(file_name)          # 文件名走请求头，中文要解码
+        settings = self._parse_settings(parse_qs(urlparse(self.path).query))
         started = time.time()
-        data = STATE.open(pdf, file_name)
+        data = STATE.open(pdf, file_name,
+                          merge_on=settings["merge_on"],
+                          dehyphenate=settings["dehyphenate_on"],
+                          target_words=settings["target_words"],
+                          table_mode=settings["table_mode"],
+                          show_all=settings["show_all"])
         if not data.get("ok"):
             return self._send_json(data, code=200)      # 解析失败也要让前端显示原因
         data["backend"] = current_backend()

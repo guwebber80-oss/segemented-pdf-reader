@@ -75,6 +75,60 @@ def count_words(text: str) -> int:
     return len([w for w in re.split(r"\s+", (text or "").strip()) if w])
 
 
+def settings_payload(settings: dict) -> dict:
+    """
+    解析设置的规范化 + 回显。
+
+    **字段名与 Streamlit 版完全一致**（`merge_on / dehyphenate_on / target_words /
+    table_mode_label / show_all`），因为设置也写进同一份 `.cache/` 记录——两个前端读同一份，
+    换前端不会"设置突然全变了"。
+    """
+    settings = settings or {}
+    label = settings.get("table_mode_label")
+    if label not in ("截图（推荐）", "保留文字"):
+        label = "保留文字" if settings.get("table_mode") == "text" else "截图（推荐）"
+    try:
+        words = int(settings.get("target_words", 200))
+    except (TypeError, ValueError):
+        words = 200
+    return {
+        "merge_on": bool(settings.get("merge_on", True)),
+        "dehyphenate_on": bool(settings.get("dehyphenate_on", True)),
+        "target_words": min(max(words, 100), 400),
+        "table_mode_label": label,
+        "table_mode": "text" if label == "保留文字" else "image",
+        "show_all": bool(settings.get("show_all", False)),
+    }
+
+
+def paragraph_cards(parse_result, registry) -> list:
+    """
+    「显示全部内容」核对模式：把**所有段落**（含页眉页脚、作者单位、参考文献）都列成卡片。
+
+    这个模式的用途是核对"过滤有没有误杀真正文"，所以保持原文、不做翻译、也不做区域截图，
+    只在标签上标明它的角色（正文/图注/页眉页脚/参考文献…）。
+    """
+    from utils.pdf_parser import ROLE_NAMES
+
+    items = []
+    for index, paragraph in enumerate(parse_result.get("paragraphs", [])):
+        role = getattr(paragraph, "role", "body")
+        items.append({
+            "i": index,
+            "number": "",
+            "section": ROLE_NAMES.get(role, role),
+            "page": int(getattr(paragraph, "page", 0) or 0),
+            "page_end": int(getattr(paragraph, "page", 0) or 0),
+            "words": count_words(getattr(paragraph, "text", "")),
+            "order": int(getattr(paragraph, "order", index) or index),
+            "segments": [{"kind": "text", "text": getattr(paragraph, "text", "")}],
+            "figures": [],
+            "is_formula": False,
+            "is_table": False,
+        })
+    return items
+
+
 def card_payload(card, images_by_card, region_registry) -> dict:
     """
     一张卡片 → JSON。
@@ -165,13 +219,21 @@ def metadata_payload(metadata, edits=None) -> dict:
     return out
 
 
+def _card_text(card) -> str:
+    """卡片可能是引擎对象，也可能是已经整理好的 dict（「显示全部内容」模式）"""
+    if isinstance(card, dict):
+        # 注意要用空格连接：直接拼会造出 "IntroductionHello" 这种假词，词数就少算了（实测差 1 个词）
+        return card.get("text") or " ".join(seg.get("text", "") for seg in card.get("segments", []))
+    return getattr(card, "text", "")
+
+
 def overview_payload(result, cards, images, table_regions) -> dict:
     """右栏「概览」用的数字（口径与 Streamlit 版一致）"""
     pages = result.get("pages", [])
     return {
         "pages": len(pages),
         "cards": len(cards),
-        "words": sum(count_words(getattr(card, "text", "")) for card in cards),
+        "words": sum(count_words(_card_text(card)) for card in cards),
         "images": len(images),
         "formula_regions": len(result.get("formula_clusters", [])),
         "table_regions": len(table_regions),
@@ -184,14 +246,17 @@ def overview_payload(result, cards, images, table_regions) -> dict:
 
 def build_paper_payload(pdf_bytes, file_name, parse_result, image_result, association,
                         metadata, position=0, cache_hit=False, backend=None, target="zh",
-                        edits=None) -> dict:
+                        edits=None, settings=None) -> dict:
     """
     汇总成一次 `/api/open` 的响应。
 
     返回的 `registry`（id → 图片来源）**不进 JSON**，由调用方留在服务端，
     供 `/api/img/<id>` 取图时查表用。
     """
-    cards = parse_result["cards"]
+    settings = settings_payload(settings)
+    # 「显示全部内容」核对模式：把全部段落列成卡片（含页眉页脚/参考文献），保持原文不翻译
+    cards = (paragraph_cards(parse_result, {}) if settings["show_all"]
+             else parse_result["cards"])
     images = image_result.get("images", [])
     table_regions = parse_result.get("table_regions", [])
 
@@ -204,7 +269,14 @@ def build_paper_payload(pdf_bytes, file_name, parse_result, image_result, associ
                 + (f" · 关联卡片 #{card_order}" if card_order else " · 未关联卡片"))
         images_by_card.setdefault(card_order, []).append({"id": ident, "item": image, "meta": meta})
 
-    payload_cards = [card_payload(card, images_by_card, registry) for card in cards]
+    # 「显示全部内容」模式下，卡片直接由段落整理而成（已经就是前端要的形状）；
+    # 正常模式才走 card_payload 组装（含公式/表格区域 id 与插图）
+    show_all = bool(settings.get("show_all"))
+    if show_all:
+        payload_cards = paragraph_cards(parse_result, registry)
+    else:
+        payload_cards = [card_payload(card, images_by_card, registry)
+                         for card in parse_result["cards"]]
 
     key = store.paper_key(pdf_bytes)
     stats = store.cache_stats()
@@ -213,7 +285,9 @@ def build_paper_payload(pdf_bytes, file_name, parse_result, image_result, associ
         "key": key,
         "cache_hit": bool(cache_hit),
         "position": int(position or 0),
-        "overview": overview_payload(parse_result, cards, images, table_regions),
+        "settings": settings_payload(settings),
+        "show_all": show_all,
+        "overview": overview_payload(parse_result, payload_cards, images, table_regions),
         "metadata": metadata_payload(metadata, edits),
         "cards": payload_cards,
         "backend": backend,

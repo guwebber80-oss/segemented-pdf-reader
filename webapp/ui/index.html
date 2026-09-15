@@ -23,6 +23,21 @@
     </div>
 
     <div class="group">
+      <div class="group-title">解析设置</div>
+      <label class="chk"><input type="checkbox" id="set-merge" checked> 段落自动合并</label>
+      <label class="chk"><input type="checkbox" id="set-dehyphenate" checked> 行尾连字符合并</label>
+      <label class="chk"><input type="checkbox" id="set-showall"> 显示全部内容（核对过滤用）</label>
+      <label class="rng">卡片目标词数 <b id="set-words-label">200</b>
+        <input type="range" id="set-words" min="100" max="400" step="25" value="200"></label>
+      <div class="seg mini" id="table-seg">
+        <button data-table="截图（推荐）" class="on">表格截图</button>
+        <button data-table="保留文字">保留文字</button>
+      </div>
+      <button class="hbtn" id="btn-reparse" title="用上面的设置重新解析当前文献（不用重新上传）">↻ 用这些设置重新解析</button>
+      <div class="cache" id="settings-note">设置与 Streamlit 版共用同一份缓存记录，两个前端看到的设置一致。</div>
+    </div>
+
+    <div class="group">
       <div class="group-title">语言</div>
       <div class="seg" id="lang-seg">
         <button data-lang="zh" class="on">中文</button>

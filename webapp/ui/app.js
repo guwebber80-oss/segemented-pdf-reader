@@ -28,6 +28,36 @@ const state = {
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g,
   (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+/* 解析设置：与 Streamlit 版同名字段（写进同一份缓存记录），存在本地供下次打开沿用 */
+function readSettings() {
+  return {
+    merge_on: $('set-merge').checked,
+    dehyphenate_on: $('set-dehyphenate').checked,
+    show_all: $('set-showall').checked,
+    target_words: Number($('set-words').value || 200),
+    table_mode_label: document.querySelector('#table-seg button.on')?.dataset.table || '截图（推荐）',
+  };
+}
+
+function applySettings(settings) {
+  const s = settings || {};
+  $('set-merge').checked = s.merge_on !== false;
+  $('set-dehyphenate').checked = s.dehyphenate_on !== false;
+  $('set-showall').checked = !!s.show_all;
+  $('set-words').value = s.target_words || 200;
+  $('set-words-label').textContent = $('set-words').value;
+  const label = s.table_mode_label || '截图（推荐）';
+  document.querySelectorAll('#table-seg button').forEach((b) =>
+    b.classList.toggle('on', b.dataset.table === label));
+}
+
+function settingsQuery() {
+  const s = readSettings();
+  return '?merge=' + (s.merge_on ? 1 : 0) + '&dehyphenate=' + (s.dehyphenate_on ? 1 : 0)
+    + '&words=' + s.target_words + '&table=' + encodeURIComponent(s.table_mode_label)
+    + '&show_all=' + (s.show_all ? 1 : 0);
+}
+
 function savePrefs() {
   try {
     localStorage.setItem(LS_KEY, JSON.stringify(
@@ -78,7 +108,7 @@ async function openFile(file) {
   if (!file) return;
   busy(true, '正在处理文献…', `${file.name} · 解析 → 提取图片 → 读元数据`);
   try {
-    const data = await api('/api/open', {
+    const data = await api('/api/open' + settingsQuery(), {
       method: 'POST',
       headers: { 'X-Filename': encodeURIComponent(file.name) },
       body: file,                       // 直接传字节，不需要 multipart
@@ -87,6 +117,7 @@ async function openFile(file) {
     state.paper = data;
     state.translations.clear();
     state.i = Math.min(data.position || 0, data.cards.length - 1);
+    applySettings(data.settings);      // 记录里存着的设置（与 Streamlit 版共用）
     renderAll();
   } catch (err) {
     alert('打开失败：' + err.message);
@@ -364,6 +395,32 @@ async function resetMetadata() {
   }
 }
 
+/* 用当前设置重新解析（不用重新上传）：设置会随记录一起存下来，两个前端一致 */
+async function reparse() {
+  if (!state.paper) { alert('请先选择一篇文献'); return; }
+  const settings = readSettings();
+  busy(true, '正在重新解析…', '按新的解析设置重算卡片、公式与表格区域');
+  try {
+    const data = await api('/api/reparse', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings }),
+    });
+    if (!data.ok) { alert('重新解析失败：' + (data.error || '未知原因')); return; }
+    state.paper = data;
+    state.translations.clear();
+    state.i = Math.min(data.position || 0, Math.max(0, data.cards.length - 1));
+    applySettings(data.settings);
+    renderAll();
+    $('settings-note').textContent = `已按新设置重新解析：${data.overview.cards} 张卡片 · `
+      + `公式区域 ${data.overview.formula_regions} 个 · 表格区域 ${data.overview.table_regions} 个`
+      + (settings.show_all ? '（显示全部内容：核对模式，保持原文不翻译）' : '');
+  } catch (err) {
+    alert('重新解析失败：' + err.message);
+  } finally {
+    busy(false);
+  }
+}
+
 async function clearCache(scope) {
   const message = scope === 'all'
     ? '清空全部缓存：所有文献记录与全部译文都会被删除（下次阅读会重新解析、重新翻译）。继续？'
@@ -488,6 +545,13 @@ function bind() {
   $('btn-meta-reset').addEventListener('click', resetMetadata);
   $('btn-clear-one').addEventListener('click', () => clearCache('paper'));
   $('btn-clear-all').addEventListener('click', () => clearCache('all'));
+  $('btn-reparse').addEventListener('click', reparse);
+  $('set-words').addEventListener('input', (e) => { $('set-words-label').textContent = e.target.value; });
+  $('table-seg').addEventListener('click', (e) => {
+    const btn = e.target.closest('button'); if (!btn) return;
+    document.querySelectorAll('#table-seg button').forEach((b) => b.classList.remove('on'));
+    btn.classList.add('on');
+  });
 
   // 元数据输入框：失焦即保存（含文本域），Ctrl+Enter 也算
   $('meta-form').addEventListener('change', (e) => {

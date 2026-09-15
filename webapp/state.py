@@ -35,6 +35,7 @@ class PaperState:
         self.image_result = {"images": [], "skipped": [], "elapsed": 0.0}
         self.metadata = None
         self.edits = {}            # 人工修正过的元数据字段（键与 Streamlit 版一致，见 payload.EDIT_KEYS）
+        self.settings = payload_module.settings_payload({})   # 解析设置（与 Streamlit 版同名字段）
         self.registry = {}
         self.position = 0
         self.cache_hit = False
@@ -42,12 +43,20 @@ class PaperState:
 
     # ---------------- 打开一篇文献 ----------------
     def open(self, pdf_bytes: bytes, file_name: str, merge_on=True, dehyphenate=True,
-             target_words=200, table_mode="image") -> dict:
-        """解析（或命中缓存）并返回给前端的 JSON（不含 registry）"""
+             target_words=200, table_mode="image", show_all=False) -> dict:
+        """
+        解析（或命中缓存）并返回给前端的 JSON（不含 registry）。
+
+        解析设置（合并/连字符/目标词数/表格呈现/显示全部）由前端传进来，并**按 Streamlit 版
+        同名字段写进记录**——两个前端共用 `.cache/`，换前端时设置不会突然变。
+        """
         with self._lock:
             self.reset()
             self.pdf_bytes = pdf_bytes
             self.file_name = file_name
+            self.settings = payload_module.settings_payload({
+                "merge_on": merge_on, "dehyphenate_on": dehyphenate,
+                "target_words": target_words, "table_mode": table_mode, "show_all": show_all})
             self.key, record = store.load_paper_for(pdf_bytes)
             self.cache_hit = record is not None
 
@@ -78,10 +87,12 @@ class PaperState:
             data = payload_module.build_paper_payload(
                 pdf_bytes, file_name, self.parse_result, self.image_result, None,
                 self.metadata, position=self.position, cache_hit=self.cache_hit,
-                backend=None, target="zh", edits=self.edits)
+                backend=None, target="zh", edits=self.edits, settings=self.settings)
             self.registry = data.pop("_registry", {})
             data["ok"] = True
             data["error"] = None
+            # 解析设置 / 元数据修正 / 阅读位置一起写回记录（两个前端共用同一份）
+            self._persist()
             return data
 
     # ---------------- 取图 ----------------
@@ -159,6 +170,7 @@ class PaperState:
             "file_size": len(self.pdf_bytes),
             "card_index": int(self.position or 0),
             "edits": dict(self.edits),
+            "settings": dict(self.settings),
         })
         record.setdefault("settings", {})
         if self.metadata is not None:

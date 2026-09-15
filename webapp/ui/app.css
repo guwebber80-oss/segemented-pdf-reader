@@ -186,6 +186,13 @@ figcaption .zoom{color:var(--accent);margin-left:6px}
 .busy-card b{display:block;margin-bottom:6px;font-size:15px}
 .busy-card span{color:var(--ink-3);font-size:13px}
 
+/* ---------- 左栏：解析设置 ---------- */
+.chk{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-2);padding:3px 0;cursor:pointer}
+.chk input{accent-color:var(--accent);width:14px;height:14px}
+.rng{display:block;font-size:12.5px;color:var(--ink-2);margin:6px 0 2px}
+.rng b{color:var(--ink)}
+.rng input{width:100%;accent-color:var(--accent)}
+#btn-reparse{margin-top:8px;width:100%}
 /* ---------- 右栏：元数据编辑 / 覆盖度 / 缓存 ---------- */
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
 .metaform{display:flex;flex-direction:column;gap:8px}
