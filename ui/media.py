@@ -7,8 +7,10 @@ ui.media —— 图片、公式、表格的渲染与缓存（阶段 5 从 app.py
 
 import streamlit as st
 
-from utils.image_extractor import render_region_image
+from utils.image_extractor import render_full_image, render_region_image
 from utils.pdf_parser import escape_markdown
+
+
 def get_full_image(pdf_bytes: bytes, image_item):
     """
     按需渲染一张图的完整尺寸，并做小缓存。

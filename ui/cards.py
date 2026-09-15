@@ -8,7 +8,7 @@ ui.cards —— 阅读卡片的标签、翻译与渲染（阶段 5 从 app.py �
 import streamlit as st
 
 from utils.pdf_parser import ROLE_NAMES, count_words, escape_markdown
-from utils.translator import TranslationError, translate_many
+from utils.translator import TranslationError, translate, translate_many
 
 from .media import (
     get_formula_image,

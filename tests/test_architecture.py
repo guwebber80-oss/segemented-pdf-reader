@@ -109,6 +109,66 @@ else:
           label.startswith("#1") and "词" in label, repr(label[:50]))
 
 print()
+print("⑦ 未定义名检查：函数体里不许出现「既不是参数、也不是模块级、还不是内置」的名字")
+# 为什么必须查：阶段 5 把面板搬进 ui/ 时，漏一个参数或漏一句 import 都不会报错，
+# 只有用户上传 PDF、页面跑到那一段时才会炸出 NameError（本轮真发生过一次：
+# ui/cards.py 引用 app.py 里的 LANG_EN）。这里按作用域静态检查，提前拦住。
+BUILTINS = set(dir(__builtins__)) | {"__file__", "__name__", "self"}
+undefined = []
+
+
+def bound_names(node, into):
+    """把一个作用域里所有「绑定」的名字收进来（参数、赋值、for/with/except、import、def/class、lambda 参数）"""
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and isinstance(child.ctx, (ast.Store, ast.Del)):
+            into.add(child.id)
+        elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            into.add(child.name)
+        elif isinstance(child, ast.Lambda):
+            into.update(arg.arg for arg in child.args.args)
+        elif isinstance(child, (ast.Import, ast.ImportFrom)):
+            for alias in child.names:
+                into.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(child, ast.ExceptHandler) and child.name:
+            into.add(child.name)
+        elif isinstance(child, ast.arg):
+            into.add(child.arg)
+
+
+for folder in (UTILS, UI):
+    for name in module_files(folder):
+        path = os.path.join(folder, name)
+        tree = ast.parse(open(path, encoding="utf-8").read(), path)
+        module_bound = set()
+        bound_names(tree, module_bound)
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            own = set()
+            bound_names(node, own)
+            loaded = {child.id for child in ast.walk(node)
+                      if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)}
+            missing = sorted(loaded - own - module_bound - BUILTINS)
+            if missing:
+                undefined.append(f"{name}::{node.name} 缺少 {missing}")
+        # 模块级代码也要查：实测漏过一次——ui/diagnostics.py 的 BACKGROUND_GROUPS
+        # 用到 6 个 ROLE_* 常量却没 import，结果**一 import 这个模块就崩**，
+        # 而只查函数体的检查完全看不见（模块级赋值不是 FunctionDef）。
+        module_loaded = {child.id for statement in tree.body
+                         if not isinstance(statement, ast.Assign)
+                         for child in ast.walk(statement)
+                         if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)}
+        for statement in tree.body:
+            if isinstance(statement, ast.Assign):
+                module_loaded |= {child.id for child in ast.walk(statement.value)
+                                  if isinstance(child, ast.Name)
+                                  and isinstance(child.ctx, ast.Load)}
+        module_missing = sorted(module_loaded - module_bound - BUILTINS)
+        if module_missing:
+            undefined.append(f"{name}::模块级 缺少 {module_missing}")
+check("ui/ 与 utils/ 的函数与模块级代码都没有未定义名", undefined == [], repr(undefined[:3]))
+
+print()
 print("⑥ 语法与 AST 检查：所有模块都能解析（防止搬运时留下半截代码）")
 broken = []
 for folder in (UTILS, UI, os.path.join(PROJECT, "tests")):
