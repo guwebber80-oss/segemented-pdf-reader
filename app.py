@@ -67,21 +67,6 @@ from ui.cards import (
     translate_cached,
 )
 from ui.diagnostics import render_background_panel, render_diagnostics
-from ui.layout import (
-    HEIGHT_KEY,
-    HEIGHT_OFFSETS,
-    IMMERSIVE_KEY,
-    KEY_CARD,
-    KEY_LEFT_BOX,
-    KEY_RIGHT_BOX,
-    SCROLL_KEY,
-    columns_spec,
-    ensure_layout_state,
-    figures_pad_spec,
-    layout_css,
-    save_prefs,
-    text_pad_spec,
-)
 from ui.metadata_panel import render_grobid_panel, render_metadata_panel
 from ui.media import (
     is_formula_item,
@@ -125,36 +110,15 @@ if "translate_stats" not in st.session_state:
 if "card_index" not in st.session_state:
     st.session_state["card_index"] = 0
 
-# 布局偏好（卡内滚动开关 / 卡片高度档位 / 沉浸模式）：会话里没有就读本地 `.cache/ui.json`，
-# 这样上次选的档位与沉浸状态，重开浏览器也还在（阶段 6.5）
-ensure_layout_state()
-
 # ============================================================
 # 第 2 部分：三栏骨架（左：功能控件 / 中：阅读卡片 / 右：背景信息）
 # ============================================================
-# 阶段 6.5：整页不滚动，左右两栏与卡片各自「卡内滚动」；沉浸模式把左右栏压到极小并隐藏。
-# 滚动/隐藏都靠给容器起 key（Streamlit 前端会给带 key 的容器加 `st-key-<key>` 类名），
-# 样式由 ui/layout.layout_css() 生成——只用自己的 key，不碰 Streamlit 的内部结构。
-immersive = bool(st.session_state.get(IMMERSIVE_KEY, False))
-scroll_layout = bool(st.session_state.get(SCROLL_KEY, True))
-card_height = st.session_state.get(HEIGHT_KEY, "中")
-st.markdown(f"<style>{layout_css(scroll_layout, immersive, card_height)}</style>",
-            unsafe_allow_html=True)
-
-col_left, col_mid, col_right = st.columns(
-    columns_spec(immersive),
-    gap="small" if immersive else "medium",
-    vertical_alignment="top",
-)
+col_left, col_mid, col_right = st.columns([0.85, 2.7, 1.05], gap="medium")
 
 # ------------------------------------------------------------
 # 2.1 左栏：上传（唯一的文件入口，不放欢迎页）
 # ------------------------------------------------------------
 with col_left:
-    # 左栏的滚动区：下面所有左栏内容都写进这个容器（阶段 6.5）
-    left_box = st.container(key=KEY_LEFT_BOX)
-
-with left_box:
     st.markdown("### 📚 阅读器")
     uploaded_file = st.file_uploader(
         label="上传文献", type=["pdf"], accept_multiple_files=False,
@@ -165,31 +129,9 @@ with left_box:
     with st.expander("🌗 明 / 暗模式", expanded=False):
         render_theme_control()
 
-    # 阅读布局（阶段 6.5）：卡内滚动可一键退回；卡片高度按显示器挑
-    with st.expander("🖥️ 阅读布局", expanded=False):
-        st.toggle(
-            "卡内滚动（页面固定）", key=SCROLL_KEY,
-            help="开启后左右两栏与卡片各自滚动、整页不跟着滚；如果显示不合适，关掉即可"
-                 "完全回到改动前的样子（本项的旧行为有回归守着）。",
-        )
-        st.radio(
-            "卡片高度", list(HEIGHT_OFFSETS), key=HEIGHT_KEY, horizontal=True,
-            help="按你的显示器挑：卡片矮一点=整页更稳，高一点=一屏看更多正文。"
-                 "沉浸模式下这个档位同样生效。",
-        )
-        st.caption("沉浸模式（隐藏左右两栏）的按钮在卡片区右上角。")
-
 # 还没选文件：中栏显示引导语，两侧留空但不渲染其它控件
 if uploaded_file is None:
     with col_mid:
-        # 陷阱防守（阶段 6.5）：沉浸模式会把左栏藏起来，而上传入口就在左栏——
-        # 上次退出时留在沉浸模式的话，这次打开会看不到上传框，所以这里必须给一条出路。
-        if immersive:
-            st.warning("当前是**沉浸模式**：左右两栏被隐藏了，上传入口也在里面。")
-            if st.button("⤡ 退出沉浸，显示左右两栏", key="exit_immersive_here", width="stretch"):
-                st.session_state[IMMERSIVE_KEY] = False
-                save_prefs()
-                st.rerun()
         st.title("📚 科研文献 PDF 智能阅读器")
         st.caption(
             "卡片式阅读（正文按章节聚合成 100~300 词）· 中英一键切换 · 插图跟随卡片 · "
@@ -197,8 +139,7 @@ if uploaded_file is None:
         )
         st.info(
             "👈 先在左栏选一篇 PDF。上传后：**中间是阅读卡片**（用卡片左右两侧的 ‹ › 翻页，"
-            "插图跟在对应卡片后面，点图可放大）· **右栏是文献背景信息**（元数据 / 概览 / 结构）· "
-            "卡片区右上角的 **⤢ 沉浸** 可以隐藏左右两栏只看卡片。"
+            "插图跟在对应卡片后面，点图可放大）· **右栏是文献背景信息**（元数据 / 概览 / 结构）。"
         )
     st.stop()      # 没有文件就停下，避免下面到处写 None 判断
 
@@ -226,7 +167,7 @@ if st.session_state.get("cache_key") != paper_key:
 # ------------------------------------------------------------
 # 2.3 左栏：语言开关与各项设置（解析设置会进解析指纹，所以必须在解析之前）
 # ------------------------------------------------------------
-with left_box:
+with col_left:
     lang = st.radio(
         "语言", [LANG_ZH, LANG_EN], horizontal=True, key="ui_lang",
         help="导入后默认中文视图；切到 EN 看原文。公式、表格与插图始终保留原文截图。",
@@ -325,7 +266,7 @@ file_key = (f"{uploaded_file.name}|{uploaded_file.size}|{merge_on}|{dehyphenate_
             f"|{target_words}|{table_mode}")
 
 if st.session_state.get("parse_key") != file_key:
-    with left_box:
+    with col_left:
         with st.spinner("正在解析 PDF…"):
             try:
                 st.session_state["parse_result"] = parse_pdf(pdf_bytes, merge_on, dehyphenate_on,
@@ -342,7 +283,7 @@ if st.session_state.get("parse_key") != file_key:
                 st.session_state["parse_error"] = f"{type(exc).__name__}: {exc}"
 
 if st.session_state.get("parse_error"):
-    with left_box:
+    with col_left:
         st.error("解析失败：" + st.session_state["parse_error"])
         st.caption("请把上面的完整报错、以及这个 PDF 的特征（单栏 / 双栏 / 扫描版）发给我，我来定位。")
     st.stop()
@@ -361,7 +302,7 @@ pages = result["pages"]
 image_key = f"{uploaded_file.name}|{uploaded_file.size}"
 
 if st.session_state.get("image_key") != image_key:
-    with left_box:
+    with col_left:
         with st.spinner("正在提取图片…"):
             try:
                 image_data = extract_images(pdf_bytes)
@@ -393,7 +334,7 @@ for img in images:
 meta_key = f"{uploaded_file.name}|{uploaded_file.size}"
 
 if st.session_state.get("meta_key") != meta_key:
-    with left_box:
+    with col_left:
         with st.spinner("正在提取文献元数据…"):
             try:
                 st.session_state["metadata"] = extract_metadata(pdf_bytes, blocks)
@@ -435,7 +376,7 @@ background_blocks = [b for b in paragraphs
                                    ROLE_LABEL, ROLE_REFERENCE, ROLE_HEADER_FOOTER)]
 layouts = " / ".join(f"第{p['页码']}页 {p['检测排版']}" for p in pages)
 
-with left_box:
+with col_left:
     with status_slot:
         st.caption(
             f"✅ 文本 {len(pages)} 页 / {len(cards)} 张卡 · "
@@ -481,21 +422,8 @@ index = min(max(index, 0), total_cards - 1) if total_cards else 0
 translated_cards = 0
 
 with col_mid:
-    # ---- 卡片区顶部：文件信息 + 沉浸开关（这一条永远固定，不随卡片滚动）----
-    head_info, head_tool = st.columns([5, 1.35], vertical_alignment="center")
-    with head_info:
-        if immersive:
-            st.caption("**沉浸模式**：只显示卡片，左右两栏已隐藏。")
-        else:
-            st.caption(f"**{uploaded_file.name}** · {layouts}")
-            st.markdown(f"#### {metadata.title.value or '（未识别到标题）'}")
-    with head_tool:
-        if st.button("⤡ 退出沉浸" if immersive else "⤢ 沉浸",
-                     key="toggle_immersive", width="stretch",
-                     help="隐藏左右两栏，只留卡片；再点一次恢复（阶段 6.5）"):
-            st.session_state[IMMERSIVE_KEY] = not immersive
-            save_prefs()
-            st.rerun()
+    st.caption(f"**{uploaded_file.name}** · {layouts}")
+    st.markdown(f"#### {metadata.title.value or '（未识别到标题）'}")
 
     if total_cards == 0:
         st.warning("这份 PDF 没有生成任何阅读卡片（可能是扫描版，或正文极少）。")
@@ -528,59 +456,55 @@ with col_mid:
         with body_col:
             st.caption(card_label(card))
 
-            # ---- 卡内滚动（阶段 6.5）：正文与插图都在这个滚动区里，
-            #      翻页按钮与下面的进度条留在区外固定不动 ----
-            with st.container(key=KEY_CARD):
-                # 内容居中：两侧留白 + 中间一列（近似 demo 里 760px 的文字列），
-                # 文字内部仍是左对齐——英文正文居中排版会串行。
-                # 沉浸模式中栏变宽，留白比例随之调整（见 ui/layout.text_pad_spec）。
-                pad_left, content_col, pad_right = st.columns(text_pad_spec(immersive))
-                with content_col:
-                    if lang == LANG_ZH and backend is None:
-                        st.warning("没有可用的翻译后端，先显示英文原文。")
-                        render_card_content(card, pdf_bytes)
-                    elif lang == LANG_ZH:
-                        if is_table_item(card) and not card.segments:
-                            render_table(paragraph_formula_payload(card), pdf_bytes)
+            # 内容居中：两侧留白 + 中间一列（近似 demo 里 760px 的文字列），
+            # 文字内部仍是左对齐——英文正文居中排版会串行。
+            pad_left, content_col, pad_right = st.columns([1, 6, 1])
+            with content_col:
+                if lang == LANG_ZH and backend is None:
+                    st.warning("没有可用的翻译后端，先显示英文原文。")
+                    render_card_content(card, pdf_bytes)
+                elif lang == LANG_ZH:
+                    if is_table_item(card) and not card.segments:
+                        render_table(paragraph_formula_payload(card), pdf_bytes)
+                        translated_cards += 1
+                    elif is_formula_item(card) and not card.segments:
+                        render_formula(paragraph_formula_payload(card), pdf_bytes)
+                        st.caption("公式区域：保留原文截图，不参与翻译。")
+                        translated_cards += 1
+                    else:
+                        status, error = render_card_translated(card, pdf_bytes, backend, target)
+                        if status == "ok":
                             translated_cards += 1
-                        elif is_formula_item(card) and not card.segments:
-                            render_formula(paragraph_formula_payload(card), pdf_bytes)
-                            st.caption("公式区域：保留原文截图，不参与翻译。")
-                            translated_cards += 1
-                        else:
-                            status, error = render_card_translated(card, pdf_bytes, backend, target)
-                            if status == "ok":
-                                translated_cards += 1
-                                st.caption("中文视图：正文与标题已翻译；公式与表格保持原文截图。")
-                            elif status == "no_segments":
-                                zh, batch_error = translate_cached(card.text, backend, target)
-                                if batch_error:
-                                    st.error(f"翻译失败：{batch_error}")
-                                    st.caption(
-                                        "下面仍然显示英文原文。若这张卡片**本地还没有译文**"
-                                        "（左栏「🌐 译文覆盖」能看出来），就需要联网翻译一次；"
-                                        "也可以在有网时先点「🌐 翻译整篇」把整篇补齐，之后断网也能看中文。")
-                                    render_card_content(card, pdf_bytes)
-                                else:
-                                    translated_cards += 1
-                                    st.markdown(escape_markdown(zh))
-                            else:
-                                st.error(f"翻译失败：{error}")
+                            st.caption("中文视图：正文与标题已翻译；公式与表格保持原文截图。")
+                        elif status == "no_segments":
+                            zh, batch_error = translate_cached(card.text, backend, target)
+                            if batch_error:
+                                st.error(f"翻译失败：{batch_error}")
                                 st.caption(
                                     "下面仍然显示英文原文。若这张卡片**本地还没有译文**"
                                     "（左栏「🌐 译文覆盖」能看出来），就需要联网翻译一次；"
                                     "也可以在有网时先点「🌐 翻译整篇」把整篇补齐，之后断网也能看中文。")
                                 render_card_content(card, pdf_bytes)
-                    else:
-                        render_card_content(card, pdf_bytes)
+                            else:
+                                translated_cards += 1
+                                st.markdown(escape_markdown(zh))
+                        else:
+                            st.error(f"翻译失败：{error}")
+                            st.caption(
+                                "下面仍然显示英文原文。若这张卡片**本地还没有译文**"
+                                "（左栏「🌐 译文覆盖」能看出来），就需要联网翻译一次；"
+                                "也可以在有网时先点「🌐 翻译整篇」把整篇补齐，之后断网也能看中文。")
+                            render_card_content(card, pdf_bytes)
+                else:
+                    render_card_content(card, pdf_bytes)
 
-                # ---- 插图跟在「它对应的那张卡片」后面（比文字列更宽），同样在卡内滚动区里 ----
-                card_images = images_by_card.get(card.order, [])
-                if card_images:
-                    fig_pad_left, figures_col, fig_pad_right = st.columns(figures_pad_spec(immersive))
-                    with figures_col:
-                        for img in card_images:
-                            render_figure(img, pdf_bytes, key_prefix=f"card{card.order}")
+            # ---- 插图跟在「它对应的那张卡片」后面（比文字列更宽）----
+            card_images = images_by_card.get(card.order, [])
+            if card_images:
+                fig_pad_left, figures_col, fig_pad_right = st.columns([0.4, 8, 0.4])
+                with figures_col:
+                    for img in card_images:
+                        render_figure(img, pdf_bytes, key_prefix=f"card{card.order}")
 
         # ---- 进度 ----
         st.progress((index + 1) / total_cards if total_cards else 0.0)
@@ -590,44 +514,42 @@ with col_mid:
 # 第 9 部分：右栏 —— 背景信息（元数据 / GROBID / 概览 / 结构 / 背景信息 / 诊断）
 # ============================================================
 with col_right:
-    # 右栏的滚动区（阶段 6.5）：下面所有右栏内容都写进这个容器
-    with st.container(key=KEY_RIGHT_BOX):
-        render_metadata_panel(metadata)
-        if st.session_state.get("meta_error"):
-            st.caption(f"⚠️ 元数据提取有异常：{st.session_state['meta_error']}")
+    render_metadata_panel(metadata)
+    if st.session_state.get("meta_error"):
+        st.caption(f"⚠️ 元数据提取有异常：{st.session_state['meta_error']}")
 
-        render_grobid_panel(meta_key, metadata, pdf_bytes, uploaded_file)
+    render_grobid_panel(meta_key, metadata, pdf_bytes, uploaded_file)
 
-        st.divider()
-        st.markdown("**📊 概览**")
-        ov1, ov2 = st.columns(2)
-        ov1.metric("页数", len(pages))
-        ov2.metric("阅读卡片", total_cards)
-        ov3, ov4 = st.columns(2)
-        ov3.metric("正文词数", f"{total_words:,}")
-        ov4.metric("解析耗时", f"{result['elapsed']} 秒")
-        st.caption(f"正文字号基准 {result['body_size']} pt · 章节 {section_count} 个 · "
-                   f"插图 {len(images)} 张 · 公式区域 {len(clusters)} 个 · 表格区域 {len(table_regions)} 个 · "
-                   f"已移出正文 {len(background_blocks)} 段")
+    st.divider()
+    st.markdown("**📊 概览**")
+    ov1, ov2 = st.columns(2)
+    ov1.metric("页数", len(pages))
+    ov2.metric("阅读卡片", total_cards)
+    ov3, ov4 = st.columns(2)
+    ov3.metric("正文词数", f"{total_words:,}")
+    ov4.metric("解析耗时", f"{result['elapsed']} 秒")
+    st.caption(f"正文字号基准 {result['body_size']} pt · 章节 {section_count} 个 · "
+               f"插图 {len(images)} 张 · 公式区域 {len(clusters)} 个 · 表格区域 {len(table_regions)} 个 · "
+               f"已移出正文 {len(background_blocks)} 段")
 
-        # 扫描版（没有文字层）要给出明确提示，不要让它静默变成空白页
-        if result["total_chars"] < 200:
-            st.warning(
-                f"⚠️ 这个 PDF 几乎提取不到文字（全文仅 {result['total_chars']} 个字符），"
-                "很可能是**扫描版 / 图片版**。本阶段不做 OCR，请换一篇有文字层的 PDF 测试。"
-            )
+    # 扫描版（没有文字层）要给出明确提示，不要让它静默变成空白页
+    if result["total_chars"] < 200:
+        st.warning(
+            f"⚠️ 这个 PDF 几乎提取不到文字（全文仅 {result['total_chars']} 个字符），"
+            "很可能是**扫描版 / 图片版**。本阶段不做 OCR，请换一篇有文字层的 PDF 测试。"
+        )
 
-        st.divider()
-        st.markdown("**🧭 文档结构**")
-        if cards:
-            st.caption(" · ".join(label for label, _ in sections))
+    st.divider()
+    st.markdown("**🧭 文档结构**")
+    if cards:
+        st.caption(" · ".join(label for label, _ in sections))
 
-        with st.expander("📎 论文背景信息（已移出卡片的内容）", expanded=False):
-            render_background_panel(background_blocks)
+    with st.expander("📎 论文背景信息（已移出卡片的内容）", expanded=False):
+        render_background_panel(background_blocks)
 
-        with st.expander("🔍 解析诊断（验证阅读顺序、核对公式与表格区域）", expanded=False):
-            render_diagnostics(ASSOC_MAX_GAP, association, blocks, clusters, image_result, images,
-                               metadata, pages, paragraphs, result, table_regions)
+    with st.expander("🔍 解析诊断（验证阅读顺序、核对公式与表格区域）", expanded=False):
+        render_diagnostics(ASSOC_MAX_GAP, association, blocks, clusters, image_result, images,
+                           metadata, pages, paragraphs, result, table_regions)
 
 # ============================================================
 # 第 10 部分：卡片渲染完之后，把翻译计数填进左栏的占位符
@@ -658,8 +580,6 @@ else:
         doi=st.session_state.get("in_doi", ""),
     ))
 store.flush_translations()
-# 布局偏好（沉浸 / 卡内滚动 / 卡片高度）也记下来：下次打开还是这个样子（阶段 6.5）
-save_prefs()
 
 with cache_slot:
     render_cache_panel(paper_key, st.session_state.get("cache_source", ""), saved_ok)

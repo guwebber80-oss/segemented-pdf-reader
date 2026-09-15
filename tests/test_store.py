@@ -252,22 +252,6 @@ check("没有环境变量时回到项目根下的 .cache",
       store.cache_root() == store.DEFAULT_CACHE_DIR
       and store.cache_root().endswith(".cache"))
 
-print()
-print("⑧ 界面偏好（阶段 6.5：沉浸模式 / 卡内滚动 / 卡片高度）")
-print("-" * 78)
-fresh("uiprefs")
-check("没写过 → 空字典（调用方自己用默认值兜底）", store.load_ui_prefs() == {})
-check("写入成功", store.save_ui_prefs({"immersive": True, "scroll": True, "height": "高"}) is True)
-check("读回来三项一致",
-      store.load_ui_prefs() == {"immersive": True, "scroll": True, "height": "高"},
-      repr(store.load_ui_prefs()))
-check("只接受简单值（复杂对象被丢掉，绝不写坏文件）",
-      store.save_ui_prefs({"ok": 1, "bad": {"a": 1}}) is True
-      and store.load_ui_prefs() == {"ok": 1}, repr(store.load_ui_prefs()))
-with open(store.ui_prefs_path(), "w", encoding="utf-8") as handle:
-    handle.write("{坏文件")
-check("文件被写坏 → 返回空字典，不抛异常", store.load_ui_prefs() == {})
-
 # 收尾：把内存里的译文表清掉，别把临时目录的状态带出去
 store.set_cache_root("")
 shutil.rmtree(SANDBOX, ignore_errors=True)
