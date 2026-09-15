@@ -7,6 +7,7 @@ ui.cards —— 阅读卡片的标签、翻译与渲染（阶段 5 从 app.py �
 
 import streamlit as st
 
+from utils import store
 from utils.pdf_parser import ROLE_NAMES, count_words, escape_markdown
 from utils.translator import TranslationError, translate, translate_many
 
@@ -21,16 +22,17 @@ from .media import (
 
 LANG_EN, LANG_ZH = "EN", "中文"
 
-LANG_EN, LANG_ZH = "EN", "中文"
-
 
 def translate_cached(text: str, backend: str, target: str):
     """
     带缓存的翻译。返回 (译文, 错误消息)，两者必有一个是 None。
 
-    缓存键是「后端 + 目标语言 + 原文」，所以：
-      · 同一张卡片来回点 中/EN，第二次起直接读缓存，不会再花额度
-      · 换后端或换目标语言会重新翻译（因为缓存键变了）
+    缓存分两层（阶段 6.1 起）：
+      · 第一层：本次会话的 session_state，最快；
+      · 第二层：本地磁盘（utils.store，键 = 后端 + 目标语言 + 原文哈希），
+        关掉浏览器、重启服务、甚至换了另一篇 PDF 里的同一段文字，都能命中，
+        不会再花额度——解析规则升级也不会让已有译文作废。
+    两层都没命中才真正请求 API，拿到结果后同时写回两层。
     """
     if not backend:
         return None, "没有可用的翻译后端：请先在 .env 里配置 API Key。"
@@ -42,6 +44,14 @@ def translate_cached(text: str, backend: str, target: str):
     if cache_key in cache:
         stats["hits"] += 1
         return cache[cache_key], None
+
+    # 第二层：本地磁盘缓存
+    saved = store.get_translation(backend, target, text)
+    if saved is not None:
+        cache[cache_key] = saved
+        stats["hits"] += 1
+        stats["disk"] = stats.get("disk", 0) + 1
+        return saved, None
 
     try:
         with st.spinner("正在翻译…"):
@@ -57,6 +67,7 @@ def translate_cached(text: str, backend: str, target: str):
         return None, f"未预期的错误 {type(exc).__name__}: {exc}"
 
     cache[cache_key] = result
+    store.put_translation(backend, target, text, result)
     stats["requests"] += 1
     stats["chars"] += len(text)
     # 同时打到终端，方便对照界面上的计数一起验证「有没有重复请求」
@@ -120,8 +131,16 @@ def translate_cached_batch(texts, backend: str, target: str):
         if key in cache:
             stats["hits"] += 1
             results[index] = cache[key]
-        else:
-            pending.append(index)
+            continue
+        # 会话里没有就问本地磁盘（跨重启、跨文献复用同一段译文）
+        saved = store.get_translation(backend, target, text)
+        if saved is not None:
+            cache[key] = saved
+            stats["hits"] += 1
+            stats["disk"] = stats.get("disk", 0) + 1
+            results[index] = saved
+            continue
+        pending.append(index)
 
     if pending:
         try:
@@ -139,6 +158,7 @@ def translate_cached_batch(texts, backend: str, target: str):
         stats["requests"] += 1          # 一次批量请求算 1 次
         for slot, translated in zip(pending, fresh):
             cache[(backend, target, texts[slot])] = translated
+            store.put_translation(backend, target, texts[slot], translated)
             stats["chars"] += len(texts[slot])
             results[slot] = translated
         print(f"[translate][成功] {backend} {target} 批量 {len(pending)} 段 "

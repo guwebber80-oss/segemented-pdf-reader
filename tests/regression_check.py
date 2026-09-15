@@ -59,6 +59,7 @@ PROJECT_SUITES = [
     ("标题/角色：DOI 不得当小标题（13 条断言）", "test_heading_roles.py"),
     ("阶段 5 架构守卫（10 条断言）", "test_architecture.py"),
     ("阶段 5 界面面板与放大弹层冒烟（14 条断言）", "test_ui_panels.py"),
+    ("阶段 6.1 本地持久化缓存（48 条断言）", "test_store.py"),
 ]
 
 # 允许变化、不参与判定的字段

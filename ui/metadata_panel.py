@@ -166,6 +166,7 @@ def render_grobid_panel(meta_key, metadata, pdf_bytes, uploaded_file):
                     st.session_state["grobid_result"] = grobid_client.header_from_pdf(
                         pdf_bytes, base_url=GROBID_BASE_URL, filename=uploaded_file.name)
                     st.session_state["grobid_error"] = None
+                    st.session_state["grobid_restored"] = False    # 这次是真跑出来的
                 except grobid_client.GrobidError as exc:
                     st.session_state["grobid_result"] = None
                     st.session_state["grobid_error"] = str(exc)
@@ -179,6 +180,10 @@ def render_grobid_panel(meta_key, metadata, pdf_bytes, uploaded_file):
             st.warning("GROBID 调用失败：" + st.session_state["grobid_error"])
         elif grobid_result:
             st.caption(grobid_client.summarize(grobid_result))
+            # 阶段 6.1：命中本地缓存时直接复用上次的结果，不必再等 5~10 秒
+            if st.session_state.get("grobid_restored"):
+                st.caption("♻️ 这份结果是**上次保存在本地的**，没有重新调用 GROBID；"
+                           "想重新抽一次就点上面的「运行 GROBID 校验」。")
 
             rows = metadata_compare.build_comparison(metadata, grobid_result)
             st.dataframe([{"字段": row["字段"], "本地规则": row["本地"],

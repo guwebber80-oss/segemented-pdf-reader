@@ -11,7 +11,8 @@
     │ 语言开关  │ ‹  [ 卡片内容，居中 ]  ›       │ GROBID 校验   │
     │ 解析设置  │ 卡片后跟着「该卡片对应的插图」    │ 概览          │
     │ 处理状态  │ 进度条 + 第 i / N 张           │ 文档结构      │
-    │ 章节导航  │ （「显示全部内容」模式在此展开）  │ 背景信息/诊断  │
+    │ 本地缓存  │ （「显示全部内容」模式在此展开）  │ 背景信息/诊断  │
+    │ 章节导航  │                              │              │
     │ 翻译计数  │                              │              │
     └──────────┴─────────────────────────────┴──────────────┘
 
@@ -19,6 +20,8 @@
   · 卡片内容**居中**、文字内部仍左对齐（英文正文居中排版会串行）；
   · 插图与卡片里的公式/表格截图都可以**点击放大**（Streamlit 原生弹层）；
   · 导入后默认中文视图（离线可用：译文命中缓存就不再请求 API）；
+  · **成果落本地**：设置、元数据修正、GROBID 结果、译文、读到第几张都存进 `.cache/`，
+    下次打开同一份 PDF 直接接上（见 utils/store.py 与 ui/persist.py）；
   · 解析、图片提取、元数据提取的逻辑与缓存指纹**保持原样**（回归比对守着）。
 
 界面的渲染函数在 `ui/`，解析与元数据的逻辑在 `utils/`，本文件只做流程编排。
@@ -28,6 +31,7 @@ import os
 
 import streamlit as st
 
+from utils import store
 from utils.image_extractor import (
     ASSOC_MAX_GAP,
     associate_with_cards,
@@ -71,6 +75,13 @@ from ui.media import (
     render_figure,
     render_formula,
     render_table,
+)
+from ui.persist import (
+    build_record,
+    render_cache_panel,
+    restore_edits,
+    restore_grobid,
+    seed_settings,
 )
 
 # ============================================================
@@ -130,7 +141,26 @@ if uploaded_file is None:
 pdf_bytes = uploaded_file.getvalue()
 
 # ------------------------------------------------------------
-# 2.2 左栏：语言开关与各项设置（解析设置会进解析指纹，所以必须在解析之前）
+# 2.2 本地缓存：这篇 PDF 上次读过没有（阶段 6.1）
+# ------------------------------------------------------------
+# 论文身份取 PDF 字节的 SHA-256（不认文件名），所以改名、换目录、重新上传同一份文件
+# 仍然命中；内容变了（期刊给了新版）就当成另一篇，此时还能按 DOI / 标题兜底找回。
+paper_key = store.paper_key(pdf_bytes)
+cached_record = store.load_paper(paper_key)
+
+# 换文件时一次性恢复「幂等的东西」：解析设置、读到第几张、元数据修正、GROBID 结果。
+# ⚠️ 必须在控件被创建之前做——Streamlit 不允许给已经创建过的带 key 控件改 session_state。
+if st.session_state.get("cache_key") != paper_key:
+    st.session_state["cache_key"] = paper_key
+    st.session_state["cache_record"] = cached_record
+    st.session_state["cache_source"] = "hash" if cached_record else ""
+    seed_settings(cached_record)
+    if cached_record:
+        # 回到上次读到的那张卡（越界由下面的翻页逻辑夹住）
+        st.session_state["card_index"] = int(cached_record.get("card_index") or 0)
+
+# ------------------------------------------------------------
+# 2.3 左栏：语言开关与各项设置（解析设置会进解析指纹，所以必须在解析之前）
 # ------------------------------------------------------------
 with col_left:
     lang = st.radio(
@@ -138,26 +168,28 @@ with col_left:
         help="导入后默认中文视图；切到 EN 看原文。公式、表格与插图始终保留原文截图。",
     )
 
+    # 注意：下面这些控件的初始值由 ui/persist.seed_settings() 预先塞进 session_state，
+    # 所以这里**不再传 value= / index=**——默认值与 Session State 同时给会触发 Streamlit 警告。
     with st.expander("⚙️ 解析设置", expanded=False):
         merge_on = st.toggle(
-            "段落自动合并", value=True,
+            "段落自动合并", key="set_merge_on",
             help="把被 PDF 拆成多块的同一段落拼回去。若发现两个独立段落被错误粘在一起，关掉它。",
         )
         dehyphenate_on = st.toggle(
-            "行尾连字符合并", value=True,
+            "行尾连字符合并", key="set_dehyphenate_on",
             help="英文排版会把单词在行尾断开（informa- / tion），开启后自动拼成 information。",
         )
         target_words = st.slider(
-            "卡片目标词数", min_value=100, max_value=400, value=200, step=25,
+            "卡片目标词数", min_value=100, max_value=400, step=25, key="set_target_words",
             help="攒到这么多词就收一张卡片；实际落点区间是这个数的 0.5~1.5 倍。",
         )
         table_mode_label = st.radio(
-            "表格呈现", ["截图（推荐）", "保留文字"], index=0,
+            "表格呈现", ["截图（推荐）", "保留文字"], key="set_table_mode_label",
             help="截图：整张表按原排版截成图片（列对齐不会丢）；保留文字：不做表格识别，"
                  "表格文字照旧线性排在卡片里（4.4-B 之前的行为，用于对照）。",
         )
         show_all = st.toggle(
-            "显示全部内容（不过滤非正文）", value=False,
+            "显示全部内容（不过滤非正文）", key="set_show_all",
             help="打开后，页眉页脚、作者单位、参考文献等也会照原样列出来，"
                  "方便你核对过滤有没有误杀真正文。该模式保持原文（不做翻译）。",
         )
@@ -202,9 +234,10 @@ with col_left:
                 load_config(force_reload=True)
                 st.rerun()
 
-        if st.button("清空翻译缓存"):
+        if st.button("清空翻译缓存", help="会话里的译文与本地保存的译文一起清掉，下次会重新翻译"):
             st.session_state["translations"] = {}
             st.session_state["translate_stats"] = {"requests": 0, "hits": 0, "chars": 0, "errors": 0}
+            store.clear_translations()          # 阶段 6.1：磁盘上的译文表也一起清
             st.rerun()
         st.caption("改完 .env 需要点「重读 .env」或重启服务才会生效。")
 
@@ -212,6 +245,9 @@ with col_left:
     st.markdown("**处理状态**")
     status_slot = st.container()          # 解析完成后往这里填状态
     meta_status_slot = st.empty()
+
+    # 本地缓存面板也先占位，等这次的成果存盘之后再填内容（数字才是最新的）
+    cache_slot = st.expander("💾 本地缓存", expanded=False)
 
 # ============================================================
 # 第 4 部分：解析（带缓存）
@@ -229,7 +265,9 @@ if st.session_state.get("parse_key") != file_key:
                                                              target_words, table_mode)
                 st.session_state["parse_key"] = file_key
                 st.session_state["parse_error"] = None
-                st.session_state["card_index"] = 0        # 换文件/换设置 → 回到第一张
+                # 换文件/换设置 → 回到第一张；有本地记录则保持上面刚恢复的阅读位置
+                if not cached_record:
+                    st.session_state["card_index"] = 0
             except Exception as exc:
                 # 解析失败不能让页面白屏，要把错误原样显示出来方便排查
                 st.session_state["parse_result"] = None
@@ -298,11 +336,24 @@ if st.session_state.get("meta_key") != meta_key:
                 from utils.metadata import Metadata
                 st.session_state["metadata"] = Metadata()
                 st.session_state["meta_error"] = f"{type(exc).__name__}: {exc}"
-        # 换了文件：清掉上一个文件留下的编辑内容，让输入框重新取自动提取值
-        for key in ("in_title", "in_doi", "in_abstract", "in_authors", "in_first_author",
-                    "in_corresponding", "in_corresponding_email", "in_affiliations",
-                    "in_supplementary", "in_author_emails"):
-            st.session_state.pop(key, None)
+
+        # 换了文件：把「人工修正过的十项」从本地记录里恢复回来（没有记录就清空，
+        # 让输入框重新取本次自动提取的值）。这一步必须在右栏渲染之前做完。
+        record = st.session_state.get("cache_record")
+        if record is None:
+            # PDF 字节对不上（重新下载、期刊更新版本），按 DOI / 标题兜底找回
+            found = store.find_by_metadata(
+                title=st.session_state["metadata"].title.value,
+                doi=st.session_state["metadata"].doi.value,
+                exclude_key=paper_key,
+            )
+            if found:
+                record = found
+                st.session_state["cache_record"] = found
+                st.session_state["cache_source"] = "meta"
+        restore_edits(record)
+        # GROBID 结果一并恢复：命中缓存就不必再等那次 5~10 秒的外部调用
+        restore_grobid(record, meta_key)
         st.session_state["meta_key"] = meta_key
 
 metadata = st.session_state["metadata"]
@@ -488,5 +539,28 @@ stats = st.session_state["translate_stats"]
 stats_slot.caption(
     f"API 请求 **{stats['requests']}** 次 · 缓存命中 **{stats['hits']}** 次 · "
     f"失败 {stats['errors']} 次 · 累计 {stats['chars']:,} 字符"
+    + (f" · 其中本地缓存 {stats['disk']} 次" if stats.get("disk") else "")
     + (f" · 当前 {translated_cards} 张显示为中文" if translated_cards else "")
 )
+
+# ============================================================
+# 第 11 部分：把这次的成果落到本地磁盘（阶段 6.1）
+# ============================================================
+# 每次交互都会走这里：记下「当前设置 + 人工修正后的元数据 + GROBID 结果 + 读到第几张」，
+# 下次打开同一份 PDF 就能原样接上。译文是另一张全局表，只在有新译文时才写盘。
+# 例外：用户刚点过「清除本篇记录」——本次会话不再把这篇写回来（no_autosave_key 是按论文记的，
+# 换个文件就自动恢复保存），否则清除动作会被脚本重跑立刻覆盖掉。
+if st.session_state.get("no_autosave_key") == paper_key:
+    saved_ok = True
+else:
+    saved_ok = store.save_paper(build_record(
+        paper_key, uploaded_file.name, uploaded_file.size,
+        st.session_state.get("card_index", 0),
+        grobid_result=st.session_state.get("grobid_result"),
+        title=st.session_state.get("in_title", ""),
+        doi=st.session_state.get("in_doi", ""),
+    ))
+store.flush_translations()
+
+with cache_slot:
+    render_cache_panel(paper_key, st.session_state.get("cache_source", ""), saved_ok)

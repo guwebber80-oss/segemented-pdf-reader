@@ -80,8 +80,8 @@ print()
 print("④ 结构与公开接口（重构后仍要能被 app.py 用）")
 expected = {
     "utils": ["pdf_parser", "formula_finder", "table_finder", "image_extractor",
-              "metadata", "grobid_client", "metadata_compare", "translator"],
-    "ui": ["media", "cards"],
+              "metadata", "grobid_client", "metadata_compare", "translator", "store"],
+    "ui": ["media", "cards", "persist"],
 }
 for package, names in expected.items():
     folder = os.path.join(PROJECT, package)
