@@ -24,6 +24,7 @@ except Exception:
     pass
 
 import pdf_parser       # noqa: E402
+import formula_finder   # noqa: E402
 
 SAMPLES = r"E:\segemented pdf reader\测试pdf"
 NPJ = os.path.join(SAMPLES, "4.3测试", "自然互动中孤独症儿童面部表情动态的量化评估.pdf")
@@ -82,8 +83,8 @@ else:
     result = analyze(NPJ)
     clusters = result["formula_clusters"]
     texts = " ".join(cluster.text for cluster in clusters)
-    check("公式区域共 5 处（含用户第二次报的那处分数）", len(clusters) == 5, repr(len(clusters)))
-    check("5 处都在第 8、9 页", sorted({c.page for c in clusters}) == [8, 9],
+    check("公式区域共 6 处（含用户两次报的三处）", len(clusters) == 6, repr(len(clusters)))
+    check("6 处都在第 8、9 页", sorted({c.page for c in clusters}) == [8, 9],
           repr(sorted({c.page for c in clusters})))
     check("含 'GEV…= n…'（此前完全没被识别）", "GEV" in texts)
     check("含 'Spearman' 那一处（大公式 Σ + 相关系数）", "Spearman" in texts)
@@ -92,6 +93,17 @@ else:
           texts[:120])
     check("第 8 页那处分数（= C(i; j) P / P i; j / ₖ C(i; k)）在同一个区域里",
           any("C(i; j)" in c.text and "C(i; k)" in c.text for c in clusters))
+    # 主动扫描发现的第三处：整行公式被拆成两块，其中一块没有公式等级
+    check("含第 9 页 'sᵢ = …' / 'sⱼ = …' 那处整行公式（主动扫描补上的）",
+          any("sⱼ" in c.text and "sᵢ" in c.text for c in clusters),
+          repr([c.text[:60] for c in clusters]))
+    clustered = {i for c in clusters for i in c.atom_indices}
+    # 注意判据：正文里提到 "nₑₘₒₜᵢₒₙ" 这类**行内**文字本来就不该出图（设计要求），
+    # 所以这里只查「已经是公式候选（有等级）却没进任何区域」的块。
+    leftovers = [b.text[:40] for i, b in enumerate(result["blocks"])
+                 if i not in clustered and (b.formula_tier or b.is_formula)
+                 and b.page in (8, 9)]
+    check("第 8、9 页再没有「是公式候选却没进区域」的块", leftovers == [], repr(leftovers))
     check("卡片正文里不再残留被错映射成控制字符的乱码块",
           not any("\x01" in card.text or "\x06" in card.text for card in result["cards"]),
           repr([card.text[:40] for card in result["cards"] if "\x01" in card.text][:2]))

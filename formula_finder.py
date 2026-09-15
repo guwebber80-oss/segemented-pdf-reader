@@ -168,18 +168,61 @@ def has_strong_math_signal(atom) -> bool:
     return bool(set(text) & BIG_OPERATORS or set(text) & STACK_EQUALITY)
 
 
+INLINE_MAX_WORDS = 24          # 「一行公式」的最大词数（放宽是因为整行公式会被拆成两块，
+                               # 其中一块可能折行；真正把关的是下面的符号密度与非散文）
+INLINE_SYMBOL_RATIO = 0.18     # 括号/分号/运算符/上下标的字符占比下限
+_DENSE_CHARS = set("()[]{};:=+−-*/<>≤≥±×÷·")
+
+
+def _dense_ratio(text: str) -> float:
+    """符号密度：公式里括号、分号、运算符、上下标很密；散文里偶尔出现的统计量达不到"""
+    if not text:
+        return 0.0
+    dense = sum(1 for ch in text if ch in _DENSE_CHARS)
+    dense += len(SCRIPT_RE.findall(text))
+    return dense / len(text)
+
+
+def _looks_like_formula_line(atom) -> bool:
+    """
+    一行**没有公式等级**的块，够不够「公式的一半」的样子。
+
+    为什么需要这条（实测 npj 第 9 页）：整行公式被拆成两块
+    （`sᵢ = {sᵢ(1); …}` 与 `sⱼ = {sⱼ(1); …}`），其中一块没有等级，
+    只按「候选块」组碎片堆就凑不满 2 块，这处公式一直不出图。
+
+    门槛必须同时卡三条，否则会误伤（都实测踩过）：
+      · 短（≤12 词）——正文句子动辄 15~20 词；
+      · 不像散文（虚词少）；
+      · **符号密度够高**——Cell Press 的正文句 `² = 0.16), demonstrating that…`
+        虽然有等号，但符号占比只有 5% 左右，靠这条挡掉。
+    另外表格块一律不进池子（Nature 的表格每行都有 `β = 13.85`）。
+    """
+    if getattr(atom, "is_table", False):
+        return False
+    text = atom.text.strip()
+    if not text or count_words(text) > INLINE_MAX_WORDS:
+        return False
+    if looks_like_prose(text) or not has_strong_math_signal(atom):
+        return False
+    return _dense_ratio(text) >= INLINE_SYMBOL_RATIO
+
+
 def find_fragment_stacks(atoms) -> list:
     """
-    找「同一处公式的碎片堆」，返回应当提升为**强候选**的块下标（每堆挑一块当种子）。
+    找「同一处公式的碎片堆」，返回应当提升为**强候选**的块下标。
 
-    判据：同一页、同一栏、公式候选（强/弱/碎片）、y 区间重叠或间距 ≤6pt、
-    整堆至少 2 块、整堆高度 ≤130pt，且**至少一块通过 has_strong_math_signal**
-    （大运算符 / 比较符 / ≥3 字母的变量名——只认上下标会把图的子图标签也算进来）。
-    挑种子时优先挑有证据的那块（其余块会被聚类吸收进来）。
+    判据：同一页、同一栏、y 区间重叠或间距 ≤6pt、整堆至少 2 块、整堆高度 ≤130pt，
+    且**至少一块通过 has_strong_math_signal**（大运算符 / 比较符——只认上下标会把
+    图的子图标签也算进来）。
+
+    池子 = 已有公式等级的候选块 + `_looks_like_formula_line` 认出的「公式半行」。
     """
     by_place = {}
     for index, atom in enumerate(atoms):
-        if not is_formula_ish(atom):
+        if getattr(atom, "is_table", False):
+            continue
+        if not (is_formula_ish(atom) or _looks_like_formula_line(atom)):
             continue
         by_place.setdefault((atom.page, getattr(atom, "column", -1)), []).append(index)
 
@@ -202,14 +245,12 @@ def find_fragment_stacks(atoms) -> list:
 
 
 def _stack_seed(atoms, run) -> list:
-    """一堆候选块 → 挑出一块当种子（没有强数学信号的堆不认）"""
+    """一堆候选块 → 挑出该提升为种子的块（没有强数学证据的堆不认）"""
     if len(run) < STACK_MIN_BLOCKS:
         return []
-    strengthened = [i for i in run if has_strong_math_signal(atoms[i])]
-    if not strengthened:
-        return []
-    # 挑「强信号且最靠上」的那块当种子，聚类会把它周围的碎片吸收进来
-    return [min(strengthened, key=lambda i: atoms[i].y0)]
+    # 把**所有**带证据的成员都提升（不只挑一块）：同一条公式常常横跨两块，
+    # 只提升一块的话，另一半仍留在文字流里、区域矩形也框不到它。
+    return [index for index in run if has_strong_math_signal(atoms[index])]
 
 
 # ------------------------------------------------------------
