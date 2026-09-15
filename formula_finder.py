@@ -133,6 +133,85 @@ def uses_math_font(atom) -> bool:
 
 
 # ------------------------------------------------------------
+# 碎片堆：给「被拆散的显示公式」当种子
+# ------------------------------------------------------------
+# 真实缺陷（用户验收时报的）：npj Digital Medicine 第 8、9 页有几处显示公式
+# 被排成上下叠放的多块碎片，例如
+#     'GEVₑₘₒₜᵢₒₙ ¼ nᵉᵐᵒᵗⁱᵒⁿ'   （分数：上面一行）
+#     'Nₜₒₜₐₗ'                    （分数：下面一行）
+# 它们只有 weak/fragment 等级——**没有强候选当种子，聚类根本不会启动**，
+# 结果这些公式既没被截成图、又作为乱码文字留在卡片里。
+# 修法：同一页同一栏里 y 区间重叠或紧邻（≤6pt）的公式候选块，只要整堆里
+# 至少有一块带**强数学信号**（数学锚点 ∑ ∫ √ 或上下标），就把整堆当成一处公式。
+STACK_GAP_PT = 6.0             # 碎片之间允许的最大垂直间距（分数分子/分母就是这样叠着的）
+STACK_MIN_BLOCKS = 2           # 至少几块才算「一处公式的碎片堆」
+STACK_MAX_HEIGHT_PT = 130.0    # 碎片堆总高度上限（再高就不是一处公式了）
+STACK_MIN_LETTERS = 3          # 保留：用于日志/诊断口径的统一（见 has_strong_math_signal）
+STACK_EQUALITY = set("=≈≤≥≠<>∝±≈≡∼")
+
+
+def has_strong_math_signal(atom) -> bool:
+    """
+    碎片堆的「这确实是一处公式」证据：大运算符（∑ ∏ ∫ ∮ √ ∂ ∇ ∞）或比较符（= ≈ ≤ ≥ ∝ ±）。
+
+    为什么**只看**运算符、不看「上下标」也不看「字母个数」——两条都踩过坑：
+      · 只看上下标：Nature Human Behaviour 第 3 页那张模型图有 9 组子图标签
+        （`A₁ O₂ B₁ B₂`、`C₁ U`、`S₂ S_F`），全是「单字母 + 下标」还互相叠着，
+        于是凭空多出 9 个「公式区域」，把图的标签变成一堆图片；
+      · 看字母个数（≥3）：图里的图例/坐标轴文字同样够长
+        （`Human, high K`、`30 s 60 s 90 s`、`Policy π`），噪声照样进来。
+    真公式总有等号或大运算符；而被错映射成乱码的等号（`¼`）已由
+    pdf_parser.repair_obfuscated_math 修回，所以这条证据是可靠的。
+    """
+    text = atom.text.strip()
+    return bool(set(text) & BIG_OPERATORS or set(text) & STACK_EQUALITY)
+
+
+def find_fragment_stacks(atoms) -> list:
+    """
+    找「同一处公式的碎片堆」，返回应当提升为**强候选**的块下标（每堆挑一块当种子）。
+
+    判据：同一页、同一栏、公式候选（强/弱/碎片）、y 区间重叠或间距 ≤6pt、
+    整堆至少 2 块、整堆高度 ≤130pt，且**至少一块通过 has_strong_math_signal**
+    （大运算符 / 比较符 / ≥3 字母的变量名——只认上下标会把图的子图标签也算进来）。
+    挑种子时优先挑有证据的那块（其余块会被聚类吸收进来）。
+    """
+    by_place = {}
+    for index, atom in enumerate(atoms):
+        if not is_formula_ish(atom):
+            continue
+        by_place.setdefault((atom.page, getattr(atom, "column", -1)), []).append(index)
+
+    seeds = []
+    for indices in by_place.values():
+        indices.sort(key=lambda i: atoms[i].y0)
+        run = []
+        for index in indices:
+            atom = atoms[index]
+            if run:
+                previous = atoms[run[-1]]
+                overlap = atom.y0 <= previous.y1 + STACK_GAP_PT
+                height_ok = (atom.y1 - atoms[run[0]].y0) <= STACK_MAX_HEIGHT_PT
+                if not (overlap and height_ok):
+                    seeds.extend(_stack_seed(atoms, run))
+                    run = []
+            run.append(index)
+        seeds.extend(_stack_seed(atoms, run))
+    return seeds
+
+
+def _stack_seed(atoms, run) -> list:
+    """一堆候选块 → 挑出一块当种子（没有强数学信号的堆不认）"""
+    if len(run) < STACK_MIN_BLOCKS:
+        return []
+    strengthened = [i for i in run if has_strong_math_signal(atoms[i])]
+    if not strengthened:
+        return []
+    # 挑「强信号且最靠上」的那块当种子，聚类会把它周围的碎片吸收进来
+    return [min(strengthened, key=lambda i: atoms[i].y0)]
+
+
+# ------------------------------------------------------------
 # 三、打分与三级分类
 # ------------------------------------------------------------
 

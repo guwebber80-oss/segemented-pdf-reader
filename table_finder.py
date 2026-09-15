@@ -72,6 +72,17 @@ MAX_ROWS = 80
 TABLE_MEDIAN_CELL_WORDS = 6
 TABLE_MIN_NUMERIC_RATIO = 0.30
 
+# 表注（表格正下方的缩写说明 / "Bold values indicate…" / "Note: …"）要一起截进图里。
+# 它们是**单行**（只有 1 个单元格），会被「表格行必须 ≥3 格」的规则排除掉——
+# 用户验收时就报了这个：表格图的最底部缺一截（npj 表 2 的
+# "EV Emotion variation, EI Expression Intensity…"、ACM 表 3 的
+# "Note: Eye dominance is for right-eyed…"、Frontiers TABLE 2 的三行缩写说明）。
+# 判据：紧贴最后一行（≤13pt）+ 字号明显小于正文（表注一贯用小字）+ 与表格同栏。
+NOTE_GAP_PT = 13.0            # 表格最后一行 → 第一条表注的最大间距
+NOTE_PITCH_PT = 12.0          # 表注行之间的最大行距
+NOTE_MAX_SIZE_RATIO = 0.92    # 表注字号 / 正文字号的上限（超过就当正文，不并进图里）
+NOTE_ALIGN_PT = 12.0          # 表注允许比表格左边界多缩进 / 左偏的最大量
+
 # 无题注的兜底（几何路径）额外要满足的条件——比题注路径严格得多：
 # 必须「单元格基本是数字/统计量」且每格都很短，否则双栏、三栏正文会被当成表格。
 GEOMETRY_MIN_ROWS = 4
@@ -98,6 +109,7 @@ class TableRegion:
     columns: int = 0                # 校验通过的列数
     rows: int = 0                   # 校验通过的行数
     line_count: int = 0             # 区域里一共多少行（含单元格行）
+    notes: int = 0                  # 表格下方一起截进来的表注行数
     kind: str = "captioned"         # captioned（有题注）/ geometry（无题注兜底）
     atom_indices: list = field(default_factory=list)   # 区域覆盖的原子块下标
     text: str = ""                  # 区域内的文字（「保留文字」模式与诊断用）
@@ -206,12 +218,51 @@ def _rows_under_caption(lines, caption):
     return rows
 
 
-def _region_rect(caption, rows):
-    """区域外接矩形：题注 + 表格行，左右外扩 1pt（截图时还会再扩 2~3pt）"""
-    left = min([caption["x0"]] + [c["x0"] for row in rows for c in row["cells"]])
-    right = max([caption["x1"]] + [c["x1"] for row in rows for c in row["cells"]])
+def _note_lines(lines, rows, body_size, table_left, table_right):
+    """
+    表格正下方的**表注**：紧贴最后一行、落在表格横向范围内、字号小于正文的那些行。
+
+    为什么要专门收它们（用户验收报的缺陷）：表注是缩写说明（"EV Emotion variation,
+    EI Expression Intensity…"）、显著性说明（"Bold values indicate the best
+    performance."）或 "Note: …"，它们在行层只有一个单元格 → 被「表格行 ≥3 格」
+    排除 → 表格截图的**最底部缺一截**。
+
+    停止条件用**字号**而不是只靠间距：正文段落同样紧跟在表格下方（实测 npj 表 1
+    下面是 y=488 的 123 词正文段），只按间距会把正文也吞进来；而表注一贯用比正文
+    小一号的字（实测 npj 6pt vs 正文 9pt、ACM 8pt vs 9.1pt、Frontiers 6.5pt）。
+    横向只做宽松检查（落在表格范围内、允许向左一点）：表注常比表体多缩进几个点
+    （实测 Frontiers 的表注比表格左边界右移 9.4pt），卡太紧会把它漏掉。
+    """
+    if not rows or body_size <= 0:
+        return []
+    bottom = rows[-1]["bottom"]
+    notes, cursor = [], bottom
+    for line in sorted(lines, key=lambda item: (item["y0"], item["x0"])):
+        if line["y0"] <= bottom - 1:
+            continue
+        if not (table_left - NOTE_ALIGN_PT <= line["x0"] <= table_right):
+            continue                   # 不在表格横向范围内（例如另一栏的正文），跳过
+        gap = line["y0"] - cursor
+        if notes:
+            if gap > NOTE_PITCH_PT:
+                break
+        elif gap > NOTE_GAP_PT:
+            break
+        if line.get("size", body_size) > body_size * NOTE_MAX_SIZE_RATIO:
+            break                      # 字号回到正文大小 → 表格已经结束
+        notes.append(line)
+        cursor = max(cursor, line["y1"])
+    return notes
+
+
+def _region_rect(caption, rows, notes=()):
+    """区域外接矩形：题注 + 表格行（+ 表注），左右外扩 1pt（截图时还会再扩 2~3pt）"""
+    cells = [caption] + [c for row in rows for c in row["cells"]] + list(notes)
+    left = min(cell["x0"] for cell in cells)
+    right = max(cell["x1"] for cell in cells)
     top = caption["y0"]
-    bottom = max(row["bottom"] for row in rows)
+    bottom = max([row["bottom"] for row in rows]
+                 + [line["y1"] for line in notes])
     return (left - 1.0, top - 1.0, right + 1.0, bottom + 1.0)
 
 
@@ -316,7 +367,8 @@ def _trim_to_columns(rows, columns_x):
     return rows[:aligned[-1] + 1]
 
 
-def find_table_regions(blocks, page_lines, page_sizes, excluded_roles=NON_TABLE_ROLES):
+def find_table_regions(blocks, page_lines, page_sizes, excluded_roles=NON_TABLE_ROLES,
+                       body_size: float = 0.0):
     """
     找出全部表格区域。返回 [TableRegion, …]，按 (页码, y) 排序。
 
@@ -325,6 +377,7 @@ def find_table_regions(blocks, page_lines, page_sizes, excluded_roles=NON_TABLE_
         page_lines  : {页码: [行, …]}，由 pdf_parser.extract_page_lines 产出
         page_sizes  : {页码: (宽, 高)}
         excluded_roles : 不参与判定的角色
+        body_size   : 正文字号（用来判断「表注」——比正文小一号的那几行）
 
     调用时机很重要：必须在**角色分类之后**（角色用来排除页眉页脚/参考文献）、
     在**公式聚类之前**（表格块先被认定，公式聚类就不会把它们吸进公式图里）。
@@ -389,17 +442,24 @@ def find_table_regions(blocks, page_lines, page_sizes, excluded_roles=NON_TABLE_
             if len(grid_rows) < MIN_ROWS:
                 continue
 
-            rect = _region_rect(caption, grid_rows)
+            # 表注（表格正下方的缩写说明 / "Bold values…" / "Note: …"）也收进来，
+            # 否则表格图的最底部会缺一截（用户验收报的缺陷）。
+            # 这里用**整页**的行来找（不限同栏）：跨栏表格的表注可能只占左栏。
+            table_left = min(cell["x0"] for row in grid_rows for cell in row["cells"])
+            table_right = max(cell["x1"] for row in grid_rows for cell in row["cells"])
+            notes = _note_lines(eligible, grid_rows, body_size, table_left, table_right)
+
+            rect = _region_rect(caption, grid_rows, notes)
             if page_height and (rect[3] - rect[1]) > page_height * MAX_REGION_HEIGHT_RATIO:
                 continue                                  # 区域高得离谱，多半是误判
 
-            cells = [caption] + [cell for row in grid_rows for cell in row["cells"]]
+            cells = [caption] + [cell for row in grid_rows for cell in row["cells"]] + notes
             atoms = sorted({owner for owner in (_line_owner(line, index) for line in cells)
                             if owner is not None})
             regions.append(TableRegion(
                 region_id=len(regions), page=page_no, rect=rect,
                 caption=caption["text"].strip(), columns=len(columns), rows=len(grid_rows),
-                line_count=len(cells), kind="captioned", atom_indices=atoms,
+                line_count=len(cells), notes=len(notes), kind="captioned", atom_indices=atoms,
                 text=" ".join(line["text"].strip() for line in cells),
             ))
             taken.append((rect[1], rect[3]))
