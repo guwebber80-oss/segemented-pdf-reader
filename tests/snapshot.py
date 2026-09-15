@@ -58,17 +58,24 @@ METADATA_FIELDS = [
 ]
 
 
-def fingerprint_one(path: str, target_words: int = 200) -> dict:
-    """采集单个 PDF 的输出指纹"""
+def fingerprint_one(path: str, target_words: int = 200, table_mode: str = "image") -> dict:
+    """采集单个 PDF 的输出指纹。
+
+    table_mode 与 pdf_parser.parse_pdf 的开关对应：
+        "image" 表格截图为图（默认，4.4-B 之后的行为）；
+        "text"  不识别表格、表格文字留在文字流（4.4-B 之前的行为，回退开关）。
+    """
     data = open(path, "rb").read()
     start = time.time()
-    result = pdf_parser.parse_pdf(data, True, True, target_words)
+    result = pdf_parser.parse_pdf(data, True, True, target_words, table_mode)
     parsed_seconds = time.time() - start
 
     cards = result["cards"]
     card_words = [pdf_parser.count_words(card.text) for card in cards] or [0]
     formula_segments = sum(1 for card in cards for kind, _ in card.segments
                            if kind == "formula")
+    table_segments = sum(1 for card in cards for kind, _ in card.segments
+                         if kind == "table")
 
     meta = metadata.extract_metadata(data, result["blocks"])
 
@@ -86,6 +93,8 @@ def fingerprint_one(path: str, target_words: int = 200) -> dict:
         "角色分布": dict(sorted(result["roles"].items())),
         "公式区域数": len(result["formula_clusters"]),
         "公式图片段落数": formula_segments,
+        "表格区域数": len(result.get("table_regions", [])),
+        "表格图片段落数": table_segments,
         "元数据": {
             "标题": meta.title.value,
             "DOI": meta.doi.value,
@@ -112,15 +121,16 @@ def fingerprint_one(path: str, target_words: int = 200) -> dict:
     }
 
 
-def collect(samples_dir: str, target_words: int = 200) -> dict:
+def collect(samples_dir: str, target_words: int = 200, table_mode: str = "image") -> dict:
     """采集一个目录下（含子目录）所有 PDF 的指纹"""
     paths = sorted(glob.glob(os.path.join(samples_dir, "**", "*.pdf"), recursive=True))
     snapshot = {"采集时间": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "样本目录": samples_dir, "样本数": len(paths), "样本": {}}
+                "样本目录": samples_dir, "样本数": len(paths), "表格模式": table_mode,
+                "样本": {}}
     for path in paths:
         name = os.path.basename(path)
         try:
-            snapshot["样本"][name] = fingerprint_one(path, target_words)
+            snapshot["样本"][name] = fingerprint_one(path, target_words, table_mode)
             print(f"  [OK] {name}")
         except Exception as exc:
             snapshot["样本"][name] = {"采集失败": f"{type(exc).__name__}: {exc}"}

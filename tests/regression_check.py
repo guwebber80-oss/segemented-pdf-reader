@@ -54,6 +54,7 @@ SUITES = [
 # 这样双击「回归检查.bat」就等于把基线比对 + 验收断言一起跑一遍。
 PROJECT_SUITES = [
     ("4.4-A 通讯作者图标标记（17 条断言）", "test_corresponding.py"),
+    ("4.4-B 表格区域截图（19 条断言）", "test_table.py"),
 ]
 
 # 允许变化、不参与判定的字段

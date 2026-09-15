@@ -33,7 +33,8 @@ from dataclasses import dataclass, field, fields, replace
 
 import pymupdf      # PDF 解析核心（PyMuPDF；新版推荐 import pymupdf，旧的 fitz 已弃用）
 
-import formula_finder   # 公式锚点表、三级判据、区域聚类（本模块依赖它，它不反向依赖本模块）
+import formula_finder
+import table_finder   # 公式锚点表、三级判据、区域聚类（本模块依赖它，它不反向依赖本模块）
 
 
 # ============================================================
@@ -293,6 +294,13 @@ def mark_formula_tiers(blocks, margins: dict) -> None:
             block.is_formula = False
             continue
 
+        # 表格区域里的块不参与公式判定（顺序上表格先判）：表格单元格里的
+        # "β = 13.85" 这类内容如果被公式聚类吸走，表格图里就会缺一块、还多出一张公式图。
+        if block.is_table:
+            block.formula_tier = ""
+            block.is_formula = False
+            continue
+
         margin = margins.get((block.page, block.column))
         if block.is_formula:                    # 提取阶段的结构证据
             block.formula_tier = (
@@ -331,6 +339,20 @@ _STATS_SYMBOL_FIXES = (
     (re.compile(r"\bh\s*p\s*(?:²|2)(?=\s*[=<>])"), "ηp²"),
     (re.compile(r"\bh\s*(?:²|2)(?=\s*[=<>])"), "η²"),
 )
+
+
+def apply_table_regions(blocks, regions) -> None:
+    """
+    把表格区域写回原子块：区域覆盖到的块标上 table_id 与 is_table。
+
+    与公式一样，is_table 的语义只有一条——**属于某个已确认的表格区域**。
+    被标上的块会以整区域截图的形式呈现，并从文字流里移出（见 build_paragraph_groups）。
+    """
+    for region in regions:
+        for index in region.atom_indices:
+            blocks[index].table_id = region.region_id
+    for block in blocks:
+        block.is_table = block.table_id >= 0
 
 
 def repair_stats_symbols(text: str) -> str:
@@ -447,6 +469,9 @@ class Block:
     is_formula: bool = False    # 是否属于某个已确认的公式区域（渲染成图片、移出文字流）
     formula_tier: str = ""      # 公式等级：strong / weak / fragment / ""（见 mark_formula_tiers）
     cluster_id: int = -1        # 所属公式区域编号（-1 = 不属于任何公式区域）
+    is_table: bool = False      # 是否属于某个已确认的表格区域（同样是截图呈现、移出文字流）
+    table_id: int = -1          # 所属表格区域编号（-1 = 不属于任何表格区域）
+    table_caption: str = ""     # 表格题注（界面在图下方标出来，便于核对）
     font_names: tuple = ()      # 块内出现的字体名（数学字体是公式的强证据）
     origin_baseline: float = 0.0  # 块内行的中位基线 y（上下标判定的基准）
 
@@ -689,16 +714,20 @@ def _make_block(page_no: int, records, dehyphenate: bool):
     )
 
 
-def extract_page_blocks(page, page_no: int, dehyphenate: bool = True):
+def extract_page(page, page_no: int, dehyphenate: bool = True):
     """
-    取出一页里的所有【文字】块。
+    一次 `page.get_text("dict")` 同时产出这一页的【文字块】与【文字行】。
 
-    说明：计划里写的是 page.get_text("blocks")，这里改用 page.get_text("dict")。
-    原因：blocks 模式不返回字号和加粗信息，而识别标题必须靠字号；
-    "dict" 模式同样按 块/行/span 组织，块划分与 blocks 一致，但信息更全。
+    为什么要一起产出：表格判定（阶段 4.4-B）需要**行级**数据，而块级数据本来
+    就要解析一遍页面；分成两个函数各解析一次的话，实测多表样本的解析耗时
+    会多出 1.7 秒（双栏.pdf 2.27s → 3.98s），纯粹是白跑的。
+
+    返回 (blocks, lines)：
+        blocks  文字块（与旧版 extract_page_blocks 完全一致）
+        lines   文字行（不合并成块，表格判据用，见 table_finder 的说明）
     """
     data = page.get_text("dict")
-    blocks = []
+    blocks, lines = [], []
 
     for raw in data.get("blocks", []):
         if raw.get("type") != 0:        # type 0 = 文字，1 = 图片（图片留到阶段 3 处理）
@@ -708,6 +737,20 @@ def extract_page_blocks(page, page_no: int, dehyphenate: bool = True):
         if not records:
             continue
 
+        # ---- 行级数据（表格判定用）----
+        for record in records:
+            text = record["text"].strip()
+            if not text:
+                continue
+            bbox = record["bbox"]
+            lines.append({
+                "page": page_no,
+                "text": text,
+                "x0": bbox[0], "y0": bbox[1], "x1": bbox[2], "y1": bbox[3],
+                "size": record["max_size"],
+            })
+
+        # ---- 块级数据 ----
         # 一个 PyMuPDF 块可能产出多个 Block：
         #   · 块首的标题行要拆出来（_split_leading_heading）
         #   · 独立成行的公式也要拆出来（_split_formula_lines）
@@ -724,7 +767,32 @@ def extract_page_blocks(page, page_no: int, dehyphenate: bool = True):
                 block.is_formula = is_formula
                 blocks.append(block)
 
-    return blocks
+    return blocks, lines
+
+
+def extract_page_blocks(page, page_no: int, dehyphenate: bool = True):
+    """
+    取出一页里的所有【文字】块（兼容入口：个别脚本与单测直接调用它）。
+
+    说明：计划里写的是 page.get_text("blocks")，这里改用 page.get_text("dict")。
+    原因：blocks 模式不返回字号和加粗信息，而识别标题必须靠字号；
+    "dict" 模式同样按 块/行/span 组织，块划分与 blocks 一致，但信息更全。
+    """
+    return extract_page(page, page_no, dehyphenate)[0]
+
+
+def extract_page_lines(page, page_no: int):
+    """
+    取出一页里的所有【文字行】——**不合并成块**，专供表格判定使用（阶段 4.4-B）。
+
+    为什么必须单独来一趟：表格一行里的每个单元格在 PDF 里都是**独立的行对象**
+    （实测 npj 一行 8 个、Nature 7 个、ACM 4 个），而 extract_page_blocks 会把
+    同一行的单元格合并成一个 Block——合并之后「哪几列对齐」这个信息就没了，
+    表格判据正是靠它区分「表格」和「两栏散文」。
+
+    实现上直接复用 extract_page（一次 get_text 同时产出块与行），不额外解析页面。
+    """
+    return extract_page(page, page_no)[1]
 
 
 def detect_gutter(blocks, page_width: float):
@@ -848,7 +916,8 @@ def _should_merge(prev: Block, cur: Block) -> bool:
     采取保守策略：宁可少合并，也不要错合并（错合并会让两张卡片粘成一张）。
     """
     # 公式块不参与段落合并：否则拆出来的公式行又会被粘回散文里
-    if prev.is_formula or cur.is_formula:
+    # 表格块同理：表格行一旦和上下文的散文粘在一起，就再也切不干净了
+    if prev.is_formula or cur.is_formula or prev.is_table or cur.is_table:
         return False
 
     if cur.page == prev.page + 1:
@@ -897,14 +966,15 @@ def build_paragraph_groups(blocks) -> list:
     旧版 merge_paragraphs 直接把后一块的文本塞进前一块，公式碎片一旦被并进散文，
     后面所有基于块的公式判定就再也看不到它了。
 
-    两条规则：
+    三条规则：
       · 已经带公式等级的块（强 / 弱 / 碎片）**各自单独成组**，
         否则碎片会被当成段落续写吞掉；
+      · 属于表格区域的块也各自单独成组（表格要整块出图，不能与散文粘在一起）；
       · 其余按 _should_merge 的保守规则判断「后一块是不是前一块的续写」。
     """
     groups = []
     for index, block in enumerate(blocks):
-        if block.is_formula or block.formula_tier:
+        if block.is_formula or block.formula_tier or block.is_table:
             groups.append([index])
             continue
         if groups and _should_merge(blocks[groups[-1][-1]], block):
@@ -993,6 +1063,26 @@ def sync_paragraph_formulas(blocks, paragraphs, clusters) -> None:
         if cluster is not None:
             paragraph.x0, paragraph.y0, paragraph.x1, paragraph.y1 = cluster.rect
             paragraph.page = cluster.page
+
+
+def sync_paragraph_tables(blocks, paragraphs, regions) -> None:
+    """
+    把原子块的表格状态同步到段落视图（卡片构建、界面渲染读的是段落层）。
+
+    与公式同理：区域内的段落坐标被**撑到整个表格区域的外接矩形**——
+    表格图渲染的就是这个矩形，一张表只出一张图，不会每个单元格各出一张。
+    """
+    region_by_id = {region.region_id: region for region in regions}
+    for paragraph in paragraphs:
+        head = blocks[paragraph.atom_indices[0]]
+        paragraph.is_table = head.is_table
+        paragraph.table_id = head.table_id
+
+        region = region_by_id.get(paragraph.table_id)
+        if region is not None:
+            paragraph.x0, paragraph.y0, paragraph.x1, paragraph.y1 = region.rect
+            paragraph.page = region.page
+            paragraph.table_caption = region.caption
 
 
 # ============================================================
@@ -1264,6 +1354,16 @@ def _formula_payload(paragraph) -> dict:
     }
 
 
+def _table_payload(paragraph) -> dict:
+    """表格段落 → 渲染载荷（同一套截图管线，只是换了区域矩形与标题）"""
+    return {
+        "page": paragraph.page,
+        "rect": (paragraph.x0, paragraph.y0, paragraph.x1, paragraph.y1),
+        "text": paragraph.text,
+        "caption": getattr(paragraph, "table_caption", ""),
+    }
+
+
 def _build_segments(buffer):
     """
     把缓冲里的段落转成卡片段落。
@@ -1272,11 +1372,12 @@ def _build_segments(buffer):
         ("heading", 文本)   章节标题（卡片内加粗显示）
         ("text",    文本)   正文
         ("formula", {...})  公式——**渲染成图片**，因为二维公式没法用一行文字表达
+        ("table",   {...})  表格——同样渲染成图片，因为线性化后列关系全丢
 
     公式段落的范围直接取「公式区域」（formula_finder 聚类得到的整簇外接矩形）：
     一个区域只出一张图，区域内的其余块在 build_reading_cards 里已经跳过。
     不再需要「按垂直间距把相邻公式粘起来」那种补丁式逻辑——聚类已经把
-    「同一处公式的上下游碎片」合并好了。
+    「同一处公式的上下游碎片」合并好了。表格段落同理，范围取整张表的外接矩形。
     """
     segments = []
     for kind, paragraph in buffer:
@@ -1285,6 +1386,8 @@ def _build_segments(buffer):
             continue
         if kind == "formula":
             segments.append(("formula", _formula_payload(paragraph)))
+        elif kind == "table":
+            segments.append(("table", _table_payload(paragraph)))
         elif kind == "heading":
             segments.append(("heading", text))
         else:
@@ -1381,6 +1484,12 @@ def build_reading_cards(paragraphs, target_words: int = 400, dehyphenate: bool =
         if paragraph.cluster_id >= 0:
             cluster_head.setdefault(paragraph.cluster_id, paragraph.atom_indices[0])
 
+    # 表格区域同理：整张表只出一张图，由区域里第一个成员负责
+    table_head = {}
+    for paragraph in paragraphs:
+        if paragraph.table_id >= 0:
+            table_head.setdefault(paragraph.table_id, paragraph.atom_indices[0])
+
     cards = []
     buffer = []                     # [(kind, Paragraph)]，kind = "heading"/"text"/"formula"
     buffer_section = ("", "")
@@ -1414,12 +1523,32 @@ def build_reading_cards(paragraphs, target_words: int = 400, dehyphenate: bool =
         if paragraph.cluster_id >= 0 \
                 and cluster_head.get(paragraph.cluster_id) != paragraph.atom_indices[0]:
             continue
+        # 同一表格区域的非头部成员：同理（表格区域可能横跨多个块）
+        if paragraph.table_id >= 0 \
+                and table_head.get(paragraph.table_id) != paragraph.atom_indices[0]:
+            continue
 
-        if paragraph.role == ROLE_HEADING:
+        if paragraph.role == ROLE_HEADING and not paragraph.is_table:
             # 章节标题进卡片内部（保持原位、加粗显示），不再单独占一张卡
             if not buffer:
                 buffer_section = (paragraph.section_number, paragraph.section_title)
             buffer.append(("heading", paragraph))
+            continue
+
+        if paragraph.is_table:
+            # 表格段落**必须排在「标题」分支之前**：表题注通常加粗、字号略大，
+            # 角色分类常把它判成 heading——先走标题分支的话，表格只会变成一行
+            # 标题文字、永远出不了图（实测 Nature Human Behaviour 第 6 页就是这样：
+            # 区域识别出来了，卡片里却一张表格图都没有）。
+            if not buffer:
+                buffer_section = (paragraph.section_number, paragraph.section_title)
+            words = count_words(paragraph.text)
+            if buffer and buffered_words() >= target_min \
+                    and buffered_words() + words > target_max:
+                close_buffer()
+            buffer.append(("table", paragraph))
+            if buffered_words() >= flush_at:
+                close_buffer()
             continue
 
         if paragraph.role not in READING_ROLES:
@@ -1458,7 +1587,7 @@ def build_reading_cards(paragraphs, target_words: int = 400, dehyphenate: bool =
 # ============================================================
 
 def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
-              target_words: int = 400) -> dict:
+              target_words: int = 400, table_mode: str = "image") -> dict:
     """
     PDF 字节流 → 阅读数据。
 
@@ -1468,11 +1597,17 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
         paragraphs       : list[Paragraph] 派生段落（背景信息、显示全部内容读它）
         groups           : list[list[int]] 段落分组（原子块下标），纯派生、可解释
         formula_clusters : list[FormulaCluster] 公式区域（含成员块下标，便于核对）
+        table_regions  : list[TableRegion] 表格区域（题注 + 对齐列几何校验通过）
         roles            : dict         各角色的块数统计（正文/页眉页脚/作者单位/参考文献…）
         pages            : list[dict]   每页的排版检测结果（诊断用）
         body_size        : float        估算出的正文字号
         total_chars      : int          全文可提取字符数（用来识别扫描版）
         elapsed          : float        解析耗时（秒）
+
+    table_mode：表格的呈现方式（侧边栏可切）
+        "image"（默认）表格识别出来、整区域截图呈现，文字移出卡片流；
+        "text"         不做表格识别，表格文字照旧线性留在卡片流里
+                       —— 这条路必须与 4.4-B 之前**逐字节一致**，是回退开关。
     """
     start = time.time()
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
@@ -1483,6 +1618,7 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
 
         pages_meta, blocks, total_chars = [], [], 0
         page_heights, page_sizes = {}, {}
+        page_lines = {}                 # 行级数据（表格判定用，只在 image 模式下采集）
 
         for i, page in enumerate(doc):
             page_no = i + 1
@@ -1491,10 +1627,12 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
             page_heights[page_no] = page.rect.height
             page_sizes[page_no] = (page.rect.width, page.rect.height)
 
-            raw_blocks = extract_page_blocks(page, page_no, dehyphenate)
+            raw_blocks, raw_lines = extract_page(page, page_no, dehyphenate)
             gutter = detect_gutter(raw_blocks, page.rect.width)
             ordered = order_blocks(raw_blocks, gutter)
             blocks.extend(ordered)
+            if table_mode == "image":
+                page_lines[page_no] = raw_lines
 
             pages_meta.append({
                 "页码": page_no,
@@ -1522,10 +1660,22 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
         classify_roles(paragraphs, page_heights, doc.page_count, body_size)
         propagate_paragraph_roles(blocks, paragraphs)
 
-        # ---- 四、公式：三级标记 → 区域聚类 → 确认的公式移出文字流 ----
-        # 顺序很重要：角色分类在前（阈值是按段落调的），公式判定与聚类在后。
-        # 公式判定读的是**原子层**，聚类也按原子块坐标做，这样碎片不会被段落吞掉。
+        # ---- 四、表格：题注锚点 + 对齐列几何校验 → 整区域截图 ----
+        # 顺序：角色分类之后（要靠角色排除页眉页脚/参考文献里的 "Table N"），
+        #      公式聚类之前（表格块先被认定，公式聚类就不会把单元格吸进公式图）。
+        # 表格判定在**行层**做：Block 已经把同一行的多个单元格合并了，列对齐信息只在行层还在。
         margins = column_margins(blocks)
+        if table_mode == "image":
+            table_regions = table_finder.find_table_regions(blocks, page_lines, page_sizes)
+            apply_table_regions(blocks, table_regions)
+            # 一行都没标上的区域不呈现（例如被排除的角色占满了），避免出现空图
+            table_regions = [region for region in table_regions
+                             if any(blocks[i].is_table for i in region.atom_indices)]
+        else:
+            table_regions = []
+
+        # ---- 五、公式：三级标记 → 区域聚类 → 确认的公式移出文字流 ----
+        # 表格块已经在 mark_formula_tiers 里被排除，不会与表格图打架。
         mark_formula_tiers(blocks, margins)
         clusters = formula_finder.find_formula_clusters(blocks, page_sizes, margins)
         apply_clusters(blocks, clusters)
@@ -1534,17 +1684,18 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
                     if any(blocks[i].cluster_id == cluster.cluster_id
                            for i in cluster.atom_indices)]
 
-        # ---- 五、段落层（第二次）：把公式块从段落里摘出来 ----
+        # ---- 六、段落层（第二次）：把公式块与表格块从段落里摘出来 ----
         # 必须重建一次：第一次分组时还不知道谁是公式，公式块会被当成段落续写并进去，
         # 于是它的文字就永远留在了散文里（第九页的
         # "…The average velocity over Nframes is k ∑ k=k−N+1" 正是这么来的）。
-        # 角色已经写在原子块上，重建视图时会自动继承。
+        # 角色已经写在原子块上，重建视图时会自动继承；表格块同理（表格要整块出图）。
         groups, paragraphs = build_paragraph_layer(blocks, merge_on, dehyphenate)
         for paragraph in paragraphs:
             paragraph.text = repair_stats_symbols(paragraph.text)
         sync_paragraph_formulas(blocks, paragraphs, clusters)
+        sync_paragraph_tables(blocks, paragraphs, table_regions)
 
-        # ---- 五、卡片：正文按章节聚合，公式区域整块出图 ----
+        # ---- 七、卡片：正文按章节聚合，公式 / 表格区域整块出图 ----
         cards = build_reading_cards(paragraphs, target_words, dehyphenate)
 
         for idx, card in enumerate(cards, 1):
@@ -1557,6 +1708,7 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
             "paragraphs": paragraphs,       # 派生段落：背景信息、显示全部内容用
             "groups": groups,               # 段落分组（原子块下标），可解释、可回退
             "formula_clusters": clusters,   # 公式区域：诊断面板据此核对「合了哪几块」
+            "table_regions": table_regions,  # 表格区域：诊断面板据此核对「框住了哪几行」
             "roles": dict(Counter(b.role for b in blocks)),
             "pages": pages_meta,
             "body_size": body_size,
