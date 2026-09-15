@@ -49,6 +49,13 @@ SUITES = [
     ("交叉校验逻辑（27 条断言）", "test_compare_offline.py"),
 ]
 
+# 提交进仓库的验收套件（就在 tests/ 目录里，任何机器上取得仓库后都能跑；
+# 样本不在本机时套件自己会跳过对应断言）。这一组**总是**执行，
+# 这样双击「回归检查.bat」就等于把基线比对 + 验收断言一起跑一遍。
+PROJECT_SUITES = [
+    ("4.4-A 通讯作者图标标记（17 条断言）", "test_corresponding.py"),
+]
+
 # 允许变化、不参与判定的字段
 SOFT_KEYS = {"_允许变化"}
 
@@ -95,18 +102,24 @@ def diff_sample(base: dict, current: dict) -> list:
     return differences
 
 
+def run_one(label: str, path: str) -> tuple:
+    """跑一个套件（stdout 直接继承，只收退出码；沙箱里不能用管道捕获子进程输出）"""
+    if not os.path.exists(path):
+        return label, "跳过（脚本不存在）"
+    print(f"\n----- {label} -----")
+    completed = subprocess.run([sys.executable, path], cwd=PROJECT)
+    return label, ("通过 [OK]" if completed.returncode == 0 else "失败 [!!]")
+
+
 def run_suites(suites_dir: str) -> tuple:
-    """跑功能测试套件（stdout 直接继承，只收退出码；沙箱里不能用管道捕获子进程输出）"""
-    results = []
-    for label, filename in SUITES:
-        path = os.path.join(suites_dir, filename)
-        if not os.path.exists(path):
-            results.append((label, "跳过（脚本不存在）"))
-            continue
-        print(f"\n----- {label} -----")
-        completed = subprocess.run([sys.executable, path], cwd=PROJECT)
-        results.append((label, "通过 [OK]" if completed.returncode == 0 else "失败 [!!]"))
-    return results
+    """跑开发侧的临时套件目录（.dsh-scratch 那类，不进仓库）"""
+    return [run_one(label, os.path.join(suites_dir, filename)) for label, filename in SUITES]
+
+
+def run_project_suites() -> tuple:
+    """跑仓库自带的验收套件（tests/ 目录里，随版本一起进 Git）"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    return [run_one(label, os.path.join(here, filename)) for label, filename in PROJECT_SUITES]
 
 
 def main() -> int:
@@ -176,18 +189,19 @@ def main() -> int:
     print("-" * 78)
     print(f"汇总：一致 {same} 篇 · 有差异 {changed} 篇 · 新增 {added} 篇 · 缺失 {missing} 篇")
 
-    suite_results = []
+    suite_results = list(run_project_suites())      # 仓库自带的验收套件：每次都跑
     if args.suites_dir:
         suites_dir = os.path.abspath(args.suites_dir)
         if os.path.isdir(suites_dir):
-            suite_results = run_suites(suites_dir)
-            print("\n" + "=" * 78)
-            print("功能测试套件")
-            print("=" * 78)
-            for label, status in suite_results:
-                print(f"  {status}  {label}")
+            suite_results += list(run_suites(suites_dir))
         else:
             print(f"\n[注意]  找不到测试套件目录：{suites_dir}（跳过）")
+    if suite_results:
+        print("\n" + "=" * 78)
+        print("功能测试套件")
+        print("=" * 78)
+        for label, status in suite_results:
+            print(f"  {status}  {label}")
 
     suites_ok = all(status.startswith(("通过", "跳过")) for _, status in suite_results)
     print("\n" + "=" * 78)
