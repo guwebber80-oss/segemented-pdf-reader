@@ -616,6 +616,45 @@ def _line_records(raw_block):
     return records
 
 
+def _split_leading_metadata(records):
+    """
+    把「字号明显小于后续内容」的前导行拆出来，返回 (前导行列表, 其余行列表)。
+
+    实测（用户报的缺陷）：npj 第 1 页的 DOI 行 `https://doi.org/10.1038/s41746-026-02375-1`
+    （8pt）紧贴在论文大标题（25.9pt）上方，两者被排进同一个 PyMuPDF 块——
+    于是整块（含 DOI）被判成一级标题，DOI 就成了卡片里的小标题。
+    拆开后：DOI 行按「封面信息」处理，标题行仍然是标题。
+
+    条件收得很紧（避免误伤正常的块）：
+      · 至少两行，且开头确实有一小段比后面小得多的行（≤ 本块最大字号的 0.6 倍，
+        整段小字行一起拆——实测 Nature Human Behaviour 第 1 页是
+        `Article`(10pt) + DOI(8pt) + 标题(26pt) 三行挤在一个块里）；
+      · 紧跟其后的那行字号 ≥ 前导段最大字号的 1.5 倍（确实存在排版层级跳变）；
+      · **前导段必须是以 DOI / URL 为主的元数据**——这条是收窄的关键：
+        实测不加它的话，图注、表格里「小字标签 + 大字数值」的块也会被拆开，
+        9 篇样本的卡片结构全被改动（改动必须零外溢）。
+    """
+    if len(records) < 2:
+        return [], records
+    block_max = max(r["max_size"] for r in records)
+    if block_max <= 0:
+        return [], records
+    leading = []
+    for record in records:
+        if record["max_size"] <= block_max * 0.6 and len(leading) < len(records) - 1:
+            leading.append(record)
+        else:
+            break
+    if not leading:
+        return [], records
+    next_size = records[len(leading)]["max_size"]
+    if next_size < max(r["max_size"] for r in leading) * 1.5:
+        return [], records
+    if url_ratio(" ".join(r["text"] for r in leading)) < URL_DOMINANT_RATIO:
+        return [], records
+    return leading, records[len(leading):]
+
+
 def _split_leading_heading(records):
     """
     把「块首的标题行」从正文块里拆出来。
@@ -804,6 +843,15 @@ def extract_page(page, page_no: int, dehyphenate: bool = True):
             })
 
         # ---- 块级数据 ----
+        # 先拆出「字号远小于后续内容」的前导行（DOI 行 / 期刊刊头），单独成块。
+        # 不拆的话它会被并进紧邻的标题块，整块（含 DOI）就成了卡片里的小标题
+        # ——这正是用户报的缺陷。
+        leading, records = _split_leading_metadata(records)
+        if leading:
+            lead_block = _make_block(page_no, leading, dehyphenate)
+            if lead_block is not None:
+                blocks.append(lead_block)
+
         # 一个 PyMuPDF 块可能产出多个 Block：
         #   · 块首的标题行要拆出来（_split_leading_heading）
         #   · 独立成行的公式也要拆出来（_split_formula_lines）
@@ -1195,6 +1243,24 @@ def estimate_body_size(blocks) -> float:
     return counter.most_common(1)[0][0]
 
 
+# ③ 文献标识（DOI / URL）的行不是标题。
+#    真实案例（用户报的缺陷，2026-09-15）：npj Digital Medicine 第 1 页把 DOI 行
+#    `https://doi.org/10.1038/s41746-026-02375-1`（8pt）紧贴在论文大标题（25.9pt）
+#    上方，两者被排进同一个文本块 → 整块（含 DOI）成了卡片里的一级小标题；
+#    期刊 running head 上的 DOI 也会同样被当成章节标题混进卡片。
+#    判据用「URL/DOI 字符占比」而不是关键词，避免误伤正文里提到链接的句子。
+_URL_LIKE_RE = re.compile(r"(?:https?://|www\.)\S+|10\.\d{4,9}/[-._;()/:A-Za-z0-9]+")
+URL_DOMINANT_RATIO = 0.45      # URL/DOI 字符占比达到这个比例就不当标题
+
+
+def url_ratio(text: str) -> float:
+    """文本里 DOI/URL 字符占多大比例（≥URL_DOMINANT_RATIO 就不当标题）"""
+    if not text:
+        return 0.0
+    covered = sum(len(match.group(0)) for match in _URL_LIKE_RE.finditer(text))
+    return covered / len(text)
+
+
 def mark_headings(blocks, body_size: float) -> None:
     """
     识别标题并标记级别（就地修改 blocks）。
@@ -1215,6 +1281,10 @@ def mark_headings(blocks, body_size: float) -> None:
 
         if not text or words > 25 or len(text) > 200:
             continue                                   # 太长，不可能是标题
+
+        # DOI / URL 行不是标题（见 _URL_LIKE_RE 的说明）
+        if url_ratio(text) >= URL_DOMINANT_RATIO:
+            continue
 
         ratio = (b.max_size / body_size) if body_size else 1.0
 
@@ -1274,6 +1344,24 @@ def classify_roles(blocks, page_heights: dict, total_pages: int, body_size: floa
             pages_by_key.setdefault(_repeat_key(block.text), set()).add(block.page)
     repeated = {key for key, pages in pages_by_key.items() if len(pages) >= 3}
 
+    # ---- 第 1 页的「标题之上」区域：期刊刊头、DOI、栏目名，都是封面信息 ----
+    # 实测（用户报的缺陷）：npj 那篇的 `npj | digital medicine` 被当成一级小标题塞进卡片。
+    # 只在**标题分支内部**生效（见 ③），不抢其它规则的角色——实测若把它提到前面统一处理，
+    # 会把 xlm 的版权声明、双栏的章节标题一起改掉（9 篇样本全变，改动必须零外溢）。
+    #
+    # 标题用「标题带」而不是单个块：论文大标题常被排成两块（实测 ACM CHI'25 的
+    # 'Tuning into Everyday Ecologies: Children's Slow Noticing in Food' 与
+    # 'Gardens' 就是两块、字号 17.0 与 17.2）——只取字号最大的那一个，
+    # 会把标题的第一行误判成「标题之上」而踢出卡片。
+    page1_headings = [b for b in blocks if b.page == 1 and b.kind == "heading"]
+    title_block = max(page1_headings, key=lambda b: b.max_size, default=None)
+    title_band = []
+    if title_block is not None:
+        for b in page1_headings:
+            if b.max_size >= title_block.max_size * 0.9 \
+                    and abs(b.y0 - title_block.y0) <= title_block.max_size * 3:
+                title_band.append(b)
+
     # ---- 参考文献的起始位置 ----
     reference_start = None
     for index, b in enumerate(blocks):
@@ -1298,11 +1386,30 @@ def classify_roles(blocks, page_heights: dict, total_pages: int, body_size: floa
             b.role = ROLE_HEADER_FOOTER
             continue
 
-        # ③ 标题：但期刊刊头（Report / Current Biology Report）和
-        #    图内面板标签（"A B C D"）都不是论文章节
+        # ②b 页面顶部（上 20%）的 DOI / URL 行：那是页眉里的文献标识，
+        #     不是章节标题、也不该以普通文字留在卡片里（用户报的缺陷）。
+        #     限定「顶部 20%」很关键：正文里的「数据可得性」链接整行不会被误判
+        #     （开发中实测：不加位置限制时 9 篇样本的角色分布全被改动）。
+        if url_ratio(text) >= URL_DOMINANT_RATIO:
+            page_height = page_heights.get(b.page, 0.0)
+            if page_height and b.y0 <= page_height * 0.2:
+                b.role = ROLE_HEADER_FOOTER if b.page > 1 else ROLE_FRONT_MATTER
+                continue
+
+        # ③ 标题：但下面几种都不是论文章节——
+        #    · 期刊刊头（Report / Current Biology Report）、图内面板标签（"A B C D"）
+        #    · DOI / URL 行（running head 上的 DOI 会混进卡片，正是用户报的缺陷）
+        #    · 第 1 页「标题之上」的块（期刊名 banner、DOI、栏目名——用户报的
+        #      `npj | digital medicine` 就是这一条）
+        #    这三条都只在「本来会被判成标题」的块上生效，不抢其它规则的角色。
         if b.kind == "heading":
+            above_title = (b.page == 1 and title_block is not None
+                           and not any(b is member for member in title_band)
+                           and b.y0 < title_block.y0 - 1)
             if _MASTHEAD_RE.match(text) or _PANEL_LABEL_RE.match(text):
                 b.role = ROLE_LABEL
+            elif url_ratio(text) >= URL_DOMINANT_RATIO or above_title:
+                b.role = ROLE_HEADER_FOOTER if b.page > 1 else ROLE_FRONT_MATTER
             else:
                 b.role = ROLE_HEADING
             continue

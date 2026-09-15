@@ -56,6 +56,7 @@ PROJECT_SUITES = [
     ("4.4-A 通讯作者图标标记（17 条断言）", "test_corresponding.py"),
     ("4.4-B 表格区域截图（19 条断言）", "test_table.py"),
     ("4.4-B 修复：公式碎片堆种子 + 表注（28 条断言）", "test_formula_seeds.py"),
+    ("标题/角色：DOI 不得当小标题（13 条断言）", "test_heading_roles.py"),
 ]
 
 # 允许变化、不参与判定的字段
