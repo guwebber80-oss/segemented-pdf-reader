@@ -69,17 +69,22 @@ from ui.cards import (
 from ui.diagnostics import render_background_panel, render_diagnostics
 from ui.layout import (
     HEIGHT_KEY,
-    HEIGHT_OFFSETS,
+    HEIGHT_PRESETS,
     IMMERSIVE_KEY,
     KEY_CARD,
     KEY_LEFT_BOX,
     KEY_RIGHT_BOX,
     SCROLL_KEY,
+    box_kwargs,
+    card_box_height,
+    card_height,
     columns_spec,
     ensure_layout_state,
     figures_pad_spec,
     layout_css,
     save_prefs,
+    side_box_height,
+    side_height,
     text_pad_spec,
 )
 from ui.metadata_panel import render_grobid_panel, render_metadata_panel
@@ -137,9 +142,15 @@ ensure_layout_state()
 # 样式由 ui/layout.layout_css() 生成——只用自己的 key，不碰 Streamlit 的内部结构。
 immersive = bool(st.session_state.get(IMMERSIVE_KEY, False))
 scroll_layout = bool(st.session_state.get(SCROLL_KEY, True))
-card_height = st.session_state.get(HEIGHT_KEY, "中")
-st.markdown(f"<style>{layout_css(scroll_layout, immersive, card_height)}</style>",
+height_mode = st.session_state.get(HEIGHT_KEY, "中")
+st.markdown(f"<style>{layout_css(scroll_layout, immersive, height_mode)}</style>",
             unsafe_allow_html=True)
+
+# 卡内滚动用**原生** st.container(height=N)：关掉开关就不传 height（完全回退）；
+# 沉浸模式下左右两栏压到 1px（内容看不见，但控件照常渲染 → 上传的文件与设置不会丢）
+left_kwargs = box_kwargs(side_box_height(scroll_layout, height_mode, immersive))
+card_kwargs = box_kwargs(card_box_height(scroll_layout, height_mode))
+right_kwargs = box_kwargs(side_box_height(scroll_layout, height_mode, immersive))
 
 col_left, col_mid, col_right = st.columns(
     columns_spec(immersive),
@@ -152,7 +163,7 @@ col_left, col_mid, col_right = st.columns(
 # ------------------------------------------------------------
 with col_left:
     # 左栏的滚动区：下面所有左栏内容都写进这个容器（阶段 6.5）
-    left_box = st.container(key=KEY_LEFT_BOX)
+    left_box = st.container(key=KEY_LEFT_BOX, **left_kwargs)
 
 with left_box:
     st.markdown("### 📚 阅读器")
@@ -173,11 +184,14 @@ with left_box:
                  "完全回到改动前的样子（本项的旧行为有回归守着）。",
         )
         st.radio(
-            "卡片高度", list(HEIGHT_OFFSETS), key=HEIGHT_KEY, horizontal=True,
-            help="按你的显示器挑：卡片矮一点=整页更稳，高一点=一屏看更多正文。"
-                 "沉浸模式下这个档位同样生效。",
+            "卡片高度", list(HEIGHT_PRESETS), key=HEIGHT_KEY, horizontal=True,
+            help=f"卡片区的可视高度：矮 {HEIGHT_PRESETS['矮']} / 中 {HEIGHT_PRESETS['中']} / "
+                 f"高 {HEIGHT_PRESETS['高']} 像素（左右两栏会自动比它高 "
+                 f"{side_height('中') - card_height('中')} 像素）。卡片内容超出这个高度时"
+                 "在卡片内部滚动，翻页按钮与进度条不动。沉浸模式下同样生效。",
         )
-        st.caption("沉浸模式（隐藏左右两栏）的按钮在卡片区右上角。")
+        st.caption("沉浸模式（隐藏左右两栏）的按钮在卡片区右上角。"
+                   "注意：滚动用的是 Streamlit 原生固定高度容器，所以高度是像素而不是自适应窗口。")
 
 # 还没选文件：中栏显示引导语，两侧留空但不渲染其它控件
 if uploaded_file is None:
@@ -530,7 +544,7 @@ with col_mid:
 
             # ---- 卡内滚动（阶段 6.5）：正文与插图都在这个滚动区里，
             #      翻页按钮与下面的进度条留在区外固定不动 ----
-            with st.container(key=KEY_CARD):
+            with st.container(key=KEY_CARD, **card_kwargs):
                 # 内容居中：两侧留白 + 中间一列（近似 demo 里 760px 的文字列），
                 # 文字内部仍是左对齐——英文正文居中排版会串行。
                 # 沉浸模式中栏变宽，留白比例随之调整（见 ui/layout.text_pad_spec）。
@@ -591,7 +605,7 @@ with col_mid:
 # ============================================================
 with col_right:
     # 右栏的滚动区（阶段 6.5）：下面所有右栏内容都写进这个容器
-    with st.container(key=KEY_RIGHT_BOX):
+    with st.container(key=KEY_RIGHT_BOX, **right_kwargs):
         render_metadata_panel(metadata)
         if st.session_state.get("meta_error"):
             st.caption(f"⚠️ 元数据提取有异常：{st.session_state['meta_error']}")
