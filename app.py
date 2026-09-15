@@ -182,6 +182,13 @@ with st.sidebar:
         help="打开后，页眉页脚、作者单位、参考文献等也会照原样列出来，"
              "方便你核对过滤有没有误杀真正文。",
     )
+    table_mode_label = st.radio(
+        "表格呈现", ["截图（推荐）", "保留文字"], index=0,
+        help="截图：整张表按原排版截成图片（列对齐不会丢），文字移出卡片流；"
+             "保留文字：不做表格识别，表格文字照旧线性排在卡片里"
+             "（4.4-B 之前的行为，用于对照）。切换会重新解析，约 1~3 秒。",
+    )
+    table_mode = "text" if table_mode_label == "保留文字" else "image"
     expand_n = st.slider("默认展开卡片数", min_value=0, max_value=10, value=3)
 
     st.divider()
@@ -261,12 +268,15 @@ pdf_bytes = uploaded_file.getvalue()
 # 第 4 部分：解析（带缓存）
 # ============================================================
 # 按「文件 + 设置」的指纹判断要不要重新解析，避免每次点击都重算一遍 PDF。
-file_key = f"{uploaded_file.name}|{uploaded_file.size}|{merge_on}|{dehyphenate_on}|{target_words}"
+# table_mode 必须进指纹：切换表格呈现方式要重新解析才会生效。
+file_key = (f"{uploaded_file.name}|{uploaded_file.size}|{merge_on}|{dehyphenate_on}"
+            f"|{target_words}|{table_mode}")
 
 if st.session_state.get("parse_key") != file_key:
     with st.spinner("正在解析 PDF…"):
         try:
-            st.session_state["parse_result"] = parse_pdf(pdf_bytes, merge_on, dehyphenate_on, target_words)
+            st.session_state["parse_result"] = parse_pdf(pdf_bytes, merge_on, dehyphenate_on,
+                                                         target_words, table_mode)
             st.session_state["parse_key"] = file_key
             st.session_state["parse_error"] = None
         except Exception as exc:
@@ -285,6 +295,7 @@ cards = result["cards"]           # 阅读卡片：正文按章节聚合到 100~
 blocks = result["blocks"]         # 原子块：元数据、诊断、图片关联用
 paragraphs = result.get("paragraphs", blocks)   # 派生段落：背景信息、「显示全部内容」用
 clusters = result.get("formula_clusters", [])   # 公式区域（整簇渲染成一张图）
+table_regions = result.get("table_regions", [])  # 表格区域（整张表渲染成一张图）
 pages = result["pages"]
 
 # ============================================================
@@ -674,8 +685,9 @@ st.subheader("📖 阅读卡片")
 st.caption(
     f"正文已按阅读顺序聚合成约 {round(target_words * 0.5)}~{round(target_words * 1.5)} 词一张的卡片，"
     "不跨「非正文」区域；卡片里的**加粗行**是原文的章节标题，"
-    "**公式以原文截图呈现**（二维排版不会失真，代价是不可选中）。"
-    "展开卡片后可用 **EN / 中文** 切换语言——切到中文时正文按段落翻译，**公式仍以原图呈现**。"
+    "**公式与表格都以原文截图呈现**（排版不会失真，代价是不可选中、不可翻译）。"
+    "展开卡片后可用 **EN / 中文** 切换语言——切到中文时正文按段落翻译，"
+    "**公式与表格仍以原图呈现**。表格也可以用侧边栏「表格呈现 → 保留文字」切回线性文字。"
 )
 
 _COLUMN_NAME = {-1: "通栏", 0: "左栏", 1: "右栏"}
@@ -782,9 +794,32 @@ def paragraph_formula_payload(item) -> dict:
     }
 
 
+def render_table(payload: dict, pdf_bytes: bytes) -> None:
+    """
+    渲染一个表格区域（与公式**共用同一套截图管线与缓存**：都是「按区域裁原页」）。
+
+    表格与公式的处境完全一样：PDF 里没有任何「表格」标记，文字线性化之后
+    列与列的关系全丢（'EV 0.758 0.682 0.735 …' 读不出哪一列是什么），
+    所以同样整区域截图呈现；代价也一样——不可选中、不可翻译。
+    """
+    try:
+        st.image(get_formula_image(pdf_bytes, payload), width="content")
+        caption = (payload.get("caption") or "").strip()
+        st.caption("表格区域：原文截图，不参与翻译"
+                   + (f"（{caption[:70]}）" if caption else "") + "。")
+    except Exception as exc:
+        st.caption(f"表格图片渲染失败（{type(exc).__name__}），下面是原文字：")
+        st.markdown(escape_markdown(payload["text"]))
+
+
 def is_formula_item(item) -> bool:
     """这个条目是不是公式区域（卡片里的公式段落、或「显示全部内容」里的公式段）"""
     return bool(getattr(item, "is_formula", False))
+
+
+def is_table_item(item) -> bool:
+    """这个条目是不是表格区域（卡片里的表格段落、或「显示全部内容」里的表格段）"""
+    return bool(getattr(item, "is_table", False))
 
 
 def render_card_translated(item, pdf_bytes: bytes, backend: str, target: str):
@@ -802,9 +837,12 @@ def render_card_translated(item, pdf_bytes: bytes, backend: str, target: str):
 
     text_indexes = [i for i, (kind, _) in enumerate(segments) if kind in ("heading", "text")]
     if not text_indexes:
-        # 整张卡片都是公式：直接显示图片，压根不需要翻译
-        for _, payload in segments:
-            render_formula(payload, pdf_bytes)
+        # 整张卡片都是公式 / 表格：直接显示图片，压根不需要翻译
+        for kind, payload in segments:
+            if kind == "table":
+                render_table(payload, pdf_bytes)
+            else:
+                render_formula(payload, pdf_bytes)
         return "ok", None
 
     translations, error = translate_cached_batch(
@@ -816,6 +854,8 @@ def render_card_translated(item, pdf_bytes: bytes, backend: str, target: str):
     for index, (kind, payload) in enumerate(segments):
         if kind == "formula":
             render_formula(payload, pdf_bytes)
+        elif kind == "table":
+            render_table(payload, pdf_bytes)      # 表格同样保持原文截图
         elif kind == "heading":
             st.markdown(f"**▍{escape_markdown(mapping.get(index, payload))}**")
         else:
@@ -835,6 +875,12 @@ def render_card_content(item, pdf_bytes: bytes) -> None:
         if is_formula_item(item):
             render_formula(paragraph_formula_payload(item), pdf_bytes)
             return
+        if is_table_item(item):
+            # 「显示全部内容」模式是给人**核对分类**用的，所以表格在这里显示原文字，
+            # 而不是截图——这样你能看清它到底框住了哪些行，也能复制里面的数字。
+            st.caption("表格区域（本模式按原文字列出，卡片视图里是整张截图）：")
+            st.markdown(escape_markdown(item.text))
+            return
         st.markdown(escape_markdown(item.text))
         return
 
@@ -848,6 +894,8 @@ def render_card_content(item, pdf_bytes: bytes) -> None:
                 # 渲染失败不能让卡片崩掉，退回显示线性文本
                 st.caption(f"公式图片渲染失败（{type(exc).__name__}），下面是线性文本：")
                 st.markdown(escape_markdown(payload["text"]))
+        elif kind == "table":
+            render_table(payload, pdf_bytes)
         else:
             st.markdown(escape_markdown(payload))
 
@@ -859,7 +907,8 @@ if show_all:
     # 不过滤：把派生段落按阅读顺序全列出来（含页眉页脚、作者单位…），便于核对有没有误杀
     display_items = [(f"#{b.order} · 第{b.page}页 · {ROLE_NAMES.get(b.role, b.role)} · "
                       f"{count_words(b.text)} 词"
-                      + (f" · 公式簇{b.cluster_id}" if b.cluster_id >= 0 else ""), b)
+                      + (f" · 公式簇{b.cluster_id}" if b.cluster_id >= 0 else "")
+                      + (f" · 表格{b.table_id}" if getattr(b, "table_id", -1) >= 0 else ""), b)
                      for b in paragraphs]
 else:
     display_items = [(card_label(card), card) for card in cards]
@@ -872,6 +921,13 @@ for label, item in display_items:
         card_lang = render_language_toggle(f"lang_{item.order}")
 
         if card_lang == LANG_ZH:
+            if is_table_item(item) and not item.segments:
+                # 表格区域：整张表原文截图，**不参与翻译**（与公式同策略）
+                render_table(paragraph_formula_payload(item), pdf_bytes)
+                translated_cards += 1
+                expanded_used += 1
+                continue
+
             if is_formula_item(item) and not item.segments:
                 # 公式区域：整簇原文截图，**不参与翻译**（用户要求公式保持原样）
                 render_formula(paragraph_formula_payload(item), pdf_bytes)
@@ -1062,6 +1118,30 @@ with st.expander("🔍 解析诊断（验证阅读顺序、定位双栏错位）
         st.caption(
             "核对方法：区域范围应当刚好框住一处公式；成员块里如果混进了正文句子，"
             "把这一页的截图和一个具体例子发给我，我按这个明细来调。"
+        )
+
+    st.markdown(f"**⑧ 表格区域明细（{len(table_regions)} 个）**"
+                "——每张表整块截图；判据是「题注锚点 + ≥3 列 × ≥3 行的对齐网格」")
+    if not table_regions:
+        st.caption("这个 PDF 没有识别到表格区域"
+                   "（2 列表格、跨页续表按设计不判；可用侧边栏「表格呈现 → 保留文字」对照）。")
+    else:
+        block_by_order = {b.order: b for b in blocks}
+        st.dataframe([{
+            "区域": f"T{region.region_id}",
+            "页码": region.page,
+            "判据": "题注" if region.kind == "captioned" else "几何兜底（无题注）",
+            "行×列": f"{region.rows} × {region.columns}",
+            "区域范围": f"({region.rect[0]:.0f}, {region.rect[1]:.0f})"
+                        f"–({region.rect[2]:.0f}, {region.rect[3]:.0f})",
+            "题注": region.caption[:40],
+            "成员块（#阅读顺序号:文本）": " | ".join(
+                f"#{block_by_order[i].order}:{block_by_order[i].text.strip()[:18]}"
+                for i in region.atom_indices if i in block_by_order),
+        } for region in table_regions], hide_index=True)
+        st.caption(
+            "核对方法：截图应当刚好框住「题注 + 表格本体」；如果框进了正文段、"
+            "或者漏掉了某张表，把那一页截图发我，我按这个明细调判据。"
         )
 
 # ============================================================
