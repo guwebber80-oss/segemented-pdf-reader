@@ -29,6 +29,16 @@ segemented-pdf-reader/
 │   ├── metadata_compare.py#   本地结果与 GROBID 的逐字段对照（只补空、不覆盖）
 │   └── translator.py      #   翻译（DeepL / OpenAI / Google，带超时与重试）
 ├── tests/                 # 验收断言 + 回归比对（见「版本管理与回滚」）
+│   ├── snapshot.py        #   输出指纹采集；baseline.json 是稳定版本的指纹
+│   ├── regression_check.py#   与基线逐字段比对 + 跑全部验收套件
+│   ├── test_*.py          #   各阶段验收断言（通讯作者图标 / 表格 / 公式 / 标题角色）
+│   ├── test_architecture.py # 阶段 5 架构守卫（分层约定 + 未定义名检查）
+│   └── test_ui_panels.py  #   假 Streamlit 冒烟：真跑一遍面板与渲染函数
+├── ui/                    # 界面辅助（允许用 Streamlit，不参与解析与元数据逻辑）
+│   ├── media.py           #   图片 / 公式 / 表格的区域截图与渲染
+│   ├── cards.py           #   卡片标签、中英切换、按段翻译与渲染
+│   ├── metadata_panel.py  #   元数据十字段面板 + GROBID 交叉校验面板
+│   └── diagnostics.py     #   论文背景信息面板 + 解析诊断面板（①~⑧）
 ├── requirements.txt       # 依赖清单
 ├── .env.example           # 环境变量模板（复制成 .env 后填 Key）
 ├── .gitignore             # 排除 .env / .venv / __pycache__ / *.pdf 等
@@ -45,6 +55,33 @@ segemented-pdf-reader/
 **公式判定为什么单独一个模块**：判据（锚点表 + 三级分类）和聚类算法加起来逻辑量很大，
 混在解析器里会让 `pdf_parser.py` 难以维护；拆出来之后可以单独跑、单独验证。
 它不反向依赖 `pdf_parser`，只按鸭子类型读原子块的属性。
+
+## 阶段 5 说明：代码结构整理（app.py 1158 → 532 行）
+
+阶段 5 只做结构，**不改任何行为**——验收标准就是「10 篇样本的回归指纹与基线完全一致」。
+
+| 步骤 | 做了什么 |
+| --- | --- |
+| 5.1 | 8 个核心模块收进 `utils/` 包（包内相对导入、外部 `from utils import …`） |
+| 5.2a | 界面辅助拆出 `ui/media.py`（截图与公式/表格渲染）、`ui/cards.py`（卡片标签/翻译/渲染） |
+| 5.2b | 两个大面板拆出 `ui/metadata_panel.py`、`ui/diagnostics.py`；app.py 里只剩流程编排 |
+
+**流程代码刻意不搬**：Streamlit 的控件状态与「脚本每次重跑」的时序强耦合，
+侧边栏取值、上传、解析缓存、卡片循环都留在 `app.py`，只搬自包含的函数与面板。
+搬面板时用 `ast` 分析代码块的自由变量**自动生成函数签名**（手工数行号切错过一次：
+把卡片循环的流程代码也一起搬走了 ✗）。
+
+**三道安全网**（都是这一次加上的，各抓到过真问题）：
+
+| 网 | 抓到的真问题 |
+| --- | --- |
+| 全样本回归比对 | 搬家后 `metadata.py` 里**函数内的延迟导入**失败被 `try` 静默吞掉 → 作者列表多出参考文献里的一个人 |
+| `test_architecture.py` 的未定义名检查 | `ui/cards.py` 少了 `translate`、`ui/media.py` 少了 `render_full_image`（点「中文」或「放大图片」才会炸） |
+| `test_ui_panels.py` 假 Streamlit 冒烟 | `ui/diagnostics.py` 的 `BACKGROUND_GROUPS` 用了 6 个 `ROLE_*` 常量却没 import → **一 import 就崩**（静态检查原来看不见模块级代码） |
+
+另一个只在搬文件时才会遇到的坑：`translator.py` 原来按 `__file__` 找同目录的 `.env`，
+搬进 `utils/` 后变成找 `utils/.env` → **翻译 Key 静默失效**；已改为回上一层定位项目根目录，
+并在验收里确认 `backend_availability → deepl: True`。
 
 ## 环境准备
 
@@ -124,7 +161,8 @@ python -m venv .venv
 - [x] **阶段 4.3** 接入 GROBID（做成「交叉校验」：本地规则 + GROBID 并排对照、逐字段一键采信）
 - [x] **阶段 4.4-A** 通讯作者的「图标标记」识别（信封图标、共同通讯作者）
 - [x] **阶段 4.4-B** 表格区域识别（默认截图为图，可切换保留文字）
-- [ ] **阶段 5** 整合全部功能、优化交互与代码结构
+- [x] **阶段 5** 代码结构整理（核心逻辑收进 `utils/`、界面收进 `ui/`，app.py 1158 → 532 行）
+- [ ] **阶段 5.3** 交互优化（方向待定：翻卡与进度保持 / 性能体检 / 侧边栏整理 / 导出笔记）
 - [ ] **阶段 6** 部署上线（Streamlit Cloud）
 
 ## 阶段 1 说明：卡片是怎么切出来的
