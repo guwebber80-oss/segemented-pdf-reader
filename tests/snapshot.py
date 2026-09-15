@@ -37,8 +37,8 @@ import time
 PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT)
 
-import metadata       # noqa: E402
-import pdf_parser     # noqa: E402
+from utils import metadata       # noqa: E402
+from utils import pdf_parser     # noqa: E402
 
 DEFAULT_SAMPLES = r"E:\segemented pdf reader\测试pdf"
 DEFAULT_OUT = os.path.join(PROJECT, "tests", "baseline.json")

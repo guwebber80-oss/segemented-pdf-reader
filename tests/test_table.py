@@ -26,8 +26,8 @@ try:
 except Exception:
     pass
 
-import pdf_parser       # noqa: E402
-import table_finder     # noqa: E402
+from utils import pdf_parser       # noqa: E402
+from utils import table_finder     # noqa: E402
 
 SAMPLES = r"E:\segemented pdf reader\测试pdf"
 NPJ = os.path.join(SAMPLES, "4.3测试", "自然互动中孤独症儿童面部表情动态的量化评估.pdf")
@@ -92,7 +92,7 @@ else:
           "0.758 0.682" not in linear, "卡片正文里仍出现表格数字串")
 
     # 截图管线本身要能跑通：区域矩形换算成像素尺寸应当与页面区域相符
-    import image_extractor
+    from utils import image_extractor
     import pymupdf
     pdf_bytes = open(NPJ, "rb").read()
     sizes = []

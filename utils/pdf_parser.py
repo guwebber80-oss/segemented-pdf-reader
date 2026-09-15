@@ -33,8 +33,8 @@ from dataclasses import dataclass, field, fields, replace
 
 import pymupdf      # PDF 解析核心（PyMuPDF；新版推荐 import pymupdf，旧的 fitz 已弃用）
 
-import formula_finder
-import table_finder   # 公式锚点表、三级判据、区域聚类（本模块依赖它，它不反向依赖本模块）
+from . import formula_finder
+from . import table_finder   # 公式锚点表、三级判据、区域聚类（本模块依赖它，它不反向依赖本模块）
 
 
 # ============================================================

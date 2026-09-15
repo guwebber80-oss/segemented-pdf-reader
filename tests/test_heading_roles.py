@@ -30,7 +30,7 @@ try:
 except Exception:
     pass
 
-import pdf_parser       # noqa: E402
+from utils import pdf_parser       # noqa: E402
 
 SAMPLES = r"E:\segemented pdf reader\测试pdf"
 NPJ = os.path.join(SAMPLES, "4.3测试", "自然互动中孤独症儿童面部表情动态的量化评估.pdf")

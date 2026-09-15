@@ -18,17 +18,17 @@ import os
 
 import streamlit as st
 
-from image_extractor import (
+from utils.image_extractor import (
     ASSOC_MAX_GAP,
     associate_with_cards,
     extract_images,
     render_full_image,
     render_region_image,
 )
-from metadata import extract_metadata
-import metadata_compare
-import grobid_client
-from pdf_parser import (
+from utils.metadata import extract_metadata
+from utils import metadata_compare
+from utils import grobid_client
+from utils.pdf_parser import (
     ROLE_AUTHOR,
     ROLE_COPYRIGHT,
     ROLE_FRONT_MATTER,
@@ -40,7 +40,7 @@ from pdf_parser import (
     escape_markdown,
     parse_pdf,
 )
-from translator import (
+from utils.translator import (
     BACKEND_LABELS,
     TARGET_LABELS,
     TranslationError,
@@ -377,7 +377,7 @@ if st.session_state.get("meta_key") != meta_key:
             st.session_state["meta_error"] = None
         except Exception as exc:
             # 元数据提取失败不影响阅读，降级成空字段让用户手填
-            from metadata import Metadata
+            from utils.metadata import Metadata
             st.session_state["metadata"] = Metadata()
             st.session_state["meta_error"] = f"{type(exc).__name__}: {exc}"
     # 换了文件：清掉上一个文件留下的编辑内容，让输入框重新取自动提取值

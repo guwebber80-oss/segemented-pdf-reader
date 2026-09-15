@@ -699,7 +699,7 @@ def extract_authors(blocks, title_value):
         return [], "未找到", note, []
 
     try:
-        from pdf_parser import estimate_body_size
+        from .pdf_parser import estimate_body_size
         body_size = estimate_body_size(blocks)
     except Exception:
         body_size = 0.0
@@ -1372,7 +1372,7 @@ def extract_metadata(pdf_bytes: bytes, blocks=None) -> Metadata:
     blocks 传入 parse_pdf 的结果（原子块）可以省一次解析；不传就自己解析一遍。
     """
     if blocks is None:
-        from pdf_parser import parse_pdf
+        from .pdf_parser import parse_pdf
         blocks = parse_pdf(pdf_bytes, merge_on=True, dehyphenate=True)["blocks"]
 
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
