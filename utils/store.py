@@ -51,6 +51,7 @@ DEFAULT_CACHE_DIR = os.path.join(PROJECT_ROOT, ".cache")
 PAPERS_DIRNAME = "papers"
 INDEX_FILENAME = "index.json"
 TRANSLATIONS_FILENAME = "translations.json"
+UI_PREFS_FILENAME = "ui.json"
 
 PAPER_KEY_LEN = 16        # 论文 key：SHA-256 前 16 个十六进制字符
 TEXT_HASH_LEN = 20        # 译文键里的原文哈希长度
@@ -445,3 +446,29 @@ def cache_stats() -> dict:
 def clear_all() -> dict:
     """清空整个缓存（记录 + 译文），返回各自清掉的条数"""
     return {"papers": clear_papers(), "translations": clear_translations()}
+
+
+# ============================================================
+# 6. 界面偏好（阶段 6.5：卡内滚动开关 / 卡片高度档位 / 沉浸模式）
+# ============================================================
+# 这类偏好不属于某一篇论文，所以单独一个小文件；都是「小、可重建」的值，
+# 坏了/删了都只影响外观，不影响任何阅读数据。
+def ui_prefs_path() -> str:
+    return os.path.join(cache_root(), UI_PREFS_FILENAME)
+
+
+def load_ui_prefs() -> dict:
+    """读界面偏好；没有或坏了都返回 {}（调用方自己用默认值兜底）"""
+    payload = _read_json(ui_prefs_path()) or {}
+    prefs = payload.get("prefs")
+    return prefs if isinstance(prefs, dict) else {}
+
+
+def save_ui_prefs(prefs: dict) -> bool:
+    """写界面偏好（原子写；只保留 JSON 装得下的简单值）"""
+    if not isinstance(prefs, dict):
+        return False
+    payload = {"version": CACHE_VERSION, "saved_at": now_text(),
+               "prefs": {str(k): v for k, v in prefs.items()
+                         if isinstance(v, (bool, int, float, str))}}
+    return _write_json(ui_prefs_path(), payload, pretty=True)
