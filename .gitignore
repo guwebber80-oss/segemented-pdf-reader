@@ -38,3 +38,6 @@ desktop.ini
 
 # ---- Streamlit 本地状态 ----
 .streamlit/secrets.toml
+
+# 交互 demo（生成物，用 .dsh-scratch/build_demo_data.py 重建）
+交互demo.html
