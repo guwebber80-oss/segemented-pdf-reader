@@ -60,6 +60,7 @@ PROJECT_SUITES = [
     ("阶段 5 架构守卫（10 条断言）", "test_architecture.py"),
     ("阶段 5 界面面板与放大弹层冒烟（14 条断言）", "test_ui_panels.py"),
     ("阶段 6.1 本地持久化缓存（48 条断言）", "test_store.py"),
+    ("阶段 6.2 明暗模式切换（24 条断言）", "test_theme.py"),
 ]
 
 # 允许变化、不参与判定的字段

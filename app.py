@@ -83,6 +83,7 @@ from ui.persist import (
     restore_grobid,
     seed_settings,
 )
+from ui.theme import render_theme_control
 
 # ============================================================
 # 第 0 部分：页面配置（必须是第一个 Streamlit 调用）
@@ -123,6 +124,9 @@ with col_left:
         key="left_uploader",
         help="支持有文字层的单栏 / 双栏 PDF；换文件会自动重新解析。",
     )
+    # 明 / 暗模式放在上传框下面：还没选文件时也能先调好再读（阶段 6.2）
+    with st.expander("🌗 明 / 暗模式", expanded=False):
+        render_theme_control()
 
 # 还没选文件：中栏显示引导语，两侧留空但不渲染其它控件
 if uploaded_file is None:
