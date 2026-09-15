@@ -162,6 +162,39 @@ else:
           bool(real["metadata"]["title"]["source"]), real["metadata"]["title"]["source"][:40])
 
 print()
+print("④ 人工修正的元数据：叠加、标记、与 Streamlit 版共用同一套键")
+print("-" * 78)
+
+
+class FakeMeta2(FakeMeta):
+    """带具体值的假元数据（用来验证"人工修正优先"）"""
+
+    def __init__(self):
+        super().__init__()
+        self.title = type("F", (), {"value": "自动标题", "source": "字号分析",
+                                    "found": True, "note": ""})()
+
+
+view = payload_module.metadata_payload(FakeMeta2(), {"in_title": "人工改过的标题"})
+check("人工修正的值优先显示", view["title"]["value"] == "人工改过的标题", view["title"]["value"])
+check("自动提取的原值仍带着（供「还原」用）", view["title"]["auto"] == "自动标题")
+check("被改过的字段有 edited 标记（界面显示 ✎）", view["title"]["edited"] is True)
+check("没改过的字段 edited=False", view["doi"]["edited"] is False)
+check("每个字段都带 store_key（前端提交时用它）",
+      all(field.get("store_key", "").startswith("in_") for key, field in view.items()
+          if key != "supplementary_items"))
+
+# 关键兼容性：网页版与 Streamlit 版共用同一份 .cache/，人工修正的键必须完全一致，
+# 否则一边改的元数据另一边看不见（这是"两套前端共用缓存"承诺的技术前提）
+try:
+    from ui import persist as ui_persist
+    check("人工修正键与 Streamlit 版完全一致（两套前端共用一份记录）",
+          set(payload_module.EDIT_KEYS.values()) == set(ui_persist.METADATA_WIDGET_KEYS),
+          repr(set(payload_module.EDIT_KEYS.values()) ^ set(ui_persist.METADATA_WIDGET_KEYS)))
+except Exception as exc:                                     # pragma: no cover
+    check("能导入 ui.persist 做键一致性核对", False, repr(exc))
+
+print()
 print("=" * 78)
 print(f"断言结果：通过 {passed} · 失败 {failed} · 跳过 {skipped}")
 sys.exit(1 if failed else 0)

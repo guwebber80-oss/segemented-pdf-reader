@@ -34,6 +34,7 @@ class PaperState:
         self.parse_result = None
         self.image_result = {"images": [], "skipped": [], "elapsed": 0.0}
         self.metadata = None
+        self.edits = {}            # 人工修正过的元数据字段（键与 Streamlit 版一致，见 payload.EDIT_KEYS）
         self.registry = {}
         self.position = 0
         self.cache_hit = False
@@ -65,17 +66,19 @@ class PaperState:
                 self.error = f"{type(exc).__name__}: {exc}"
                 return {"ok": False, "error": self.error}
 
-            # 上次读到第几张：命中本地记录就接着上次
+            # 上次读到第几张 / 人工修正过的元数据：命中本地记录就接上
             if record:
                 try:
                     self.position = int(record.get("card_index") or 0)
                 except Exception:
                     self.position = 0
+                edits = record.get("edits")
+                self.edits = dict(edits) if isinstance(edits, dict) else {}
 
             data = payload_module.build_paper_payload(
                 pdf_bytes, file_name, self.parse_result, self.image_result, None,
                 self.metadata, position=self.position, cache_hit=self.cache_hit,
-                backend=None, target="zh")
+                backend=None, target="zh", edits=self.edits)
             self.registry = data.pop("_registry", {})
             data["ok"] = True
             data["error"] = None
@@ -136,26 +139,101 @@ class PaperState:
         return {"ok": True, "translations": out, "error": None,
                 "from_cache": len(wanted) - len(pending)}
 
-    # ---------------- 阅读位置 / 覆盖率 ----------------
+    # ---------------- 阅读位置 / 元数据修正 / 缓存 ----------------
+    def _persist(self) -> bool:
+        """
+        把当前状态合并写回本地记录。
+
+        ⚠️ **必须"读旧记录再改字段"**，不能新建一个空记录覆盖：
+        记录里还装着解析设置、人工修正的元数据（edits）、GROBID 结果等，
+        覆盖写会把它们抹掉（实测：网页版翻页时会把 Streamlit 版存下的元数据修正清空 ✗）。
+        """
+        if self.pdf_bytes is None:
+            return False
+        existing = store.load_paper(self.key) or {}
+        record = dict(existing)
+        record.update({
+            "version": store.CACHE_VERSION,
+            "key": self.key,
+            "file_name": self.file_name,
+            "file_size": len(self.pdf_bytes),
+            "card_index": int(self.position or 0),
+            "edits": dict(self.edits),
+        })
+        record.setdefault("settings", {})
+        if self.metadata is not None:
+            record["metadata"] = {"title": self.metadata.title.value or "",
+                                  "doi": self.metadata.doi.value or ""}
+        return store.save_paper(record)
+
     def save_position(self, index: int) -> bool:
         """把"读到第几张"写进本地记录（下次打开接着读）"""
         with self._lock:
-            if self.pdf_bytes is None or self.metadata is None:
-                return False
             self.position = int(index or 0)
-            record = {
-                "version": store.CACHE_VERSION,
-                "key": self.key,
-                "file_name": self.file_name,
-                "file_size": len(self.pdf_bytes),
-                "settings": {},
-                "metadata": {"title": self.metadata.title.value or "",
-                             "doi": self.metadata.doi.value or ""},
-                "edits": {},
-                "grobid": None,
-                "card_index": self.position,
-            }
-            return store.save_paper(record)
+            return self._persist()
+
+    def save_metadata(self, edits: dict) -> dict:
+        """
+        保存人工修正的元数据。
+
+        键用**与 Streamlit 版相同的那套**（`in_title` 等），这样两个前端改的是同一份记录、
+        互相都看得见（两套前端共用 `.cache/`）。未知键直接丢弃，避免脏数据写进记录。
+        """
+        with self._lock:
+            cleaned = {}
+            for key, value in (edits or {}).items():
+                # 只认 `in_xxx` 这套存储键（AUTO_FIELDS 的键就是它们；EDIT_KEYS 是反过来的映射）
+                if key in payload_module.AUTO_FIELDS and isinstance(value, str):
+                    cleaned[key] = value
+            # 值与原值相同时不算"修正"，省得记录里全是和自动提取一样的冗余
+            for key, value in list(cleaned.items()):
+                field = payload_module.AUTO_FIELDS.get(key)
+                if not field:
+                    continue
+                auto = getattr(self.metadata, field, None)
+                if auto is not None and (auto.value or "") == value:
+                    cleaned.pop(key)
+            self.edits = cleaned
+            ok = self._persist()
+            return {"ok": ok, "edits": self.edits}
+
+    def clear_metadata_edits(self) -> dict:
+        """丢掉人工修正，回到自动提取的值（对应 Streamlit 版的「↺ 用自动提取结果覆盖」）"""
+        with self._lock:
+            self.edits = {}
+            ok = self._persist()
+            return {"ok": ok, "edits": {}}
+
+    def refresh_metadata_view(self):
+        """返回（自动值 + 人工修正叠加后）的元数据，供前端渲染"""
+        with self._lock:
+            return payload_module.metadata_payload(self.metadata, self.edits)
+
+    # ---------------- 整篇翻译的待译清单 ----------------
+    def pending_texts(self, backend: str, target: str = "zh", limit: int = 400) -> list:
+        """
+        还没译文的段落（前端拿它循环调用 `/api/translate` 做"翻译整篇"）。
+        只返回文本本身，前端按批请求；已有译文的不再返回（服务端与磁盘缓存都命中就不会重复花钱）。
+        """
+        with self._lock:
+            if not self.parse_result:
+                return []
+            pending = translate_plan.pending_texts(self.parse_result["cards"], backend, target)
+            return pending[:limit]
+
+    # ---------------- 缓存管理 ----------------
+    def clear_cache(self, scope: str = "paper") -> dict:
+        """清缓存：`paper`=只删这篇的记录（译文是全局的，不动）；`all`=记录 + 全部译文"""
+        with self._lock:
+            if scope == "all":
+                cleared = store.clear_all()
+                self.cache_hit = False
+                self.edits = {}
+                return {"ok": True, "scope": "all", "cleared": cleared}
+            deleted = store.delete_paper(self.key) if self.key else False
+            self.cache_hit = False
+            self.edits = {}
+            return {"ok": True, "scope": "paper", "deleted": bool(deleted)}
 
     def coverage(self, backend: str, target: str = "zh") -> dict:
         """译文覆盖度（哪些卡片已有译文、还差多少段）"""

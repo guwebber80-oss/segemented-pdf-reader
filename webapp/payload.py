@@ -21,6 +21,34 @@ TEXT_KINDS = ("heading", "text")
 # 以区域截图呈现的类型
 REGION_KINDS = ("formula", "table")
 
+# 人工修正用的存储键：**故意沿用 Streamlit 版那套 `in_xxx`**
+# —— 两个前端共用同一份 `.cache/`，键一样才意味着你在任一侧改的元数据，另一侧也看得见。
+EDIT_KEYS = {
+    "title": "in_title",
+    "doi": "in_doi",
+    "abstract": "in_abstract",
+    "authors": "in_authors",
+    "first_author": "in_first_author",
+    "corresponding": "in_corresponding",
+    "corresponding_email": "in_corresponding_email",
+    "affiliations": "in_affiliations",
+    "supplementary": "in_supplementary",
+    "author_emails": "in_author_emails",
+}
+# 存储键 → Metadata 对象的字段名（用来判断"值与自动提取相同 ⇒ 不算修正"）
+AUTO_FIELDS = {
+    "in_title": "title",
+    "in_doi": "doi",
+    "in_abstract": "abstract",
+    "in_authors": "authors",
+    "in_first_author": "first_author",
+    "in_corresponding": "corresponding_author",
+    "in_corresponding_email": "corresponding_email",
+    "in_affiliations": "affiliations",
+    "in_supplementary": "supplementary_links",
+    "in_author_emails": "author_emails",
+}
+
 
 def _round(value, digits=1):
     try:
@@ -94,8 +122,14 @@ def card_payload(card, images_by_card, region_registry) -> dict:
     }
 
 
-def metadata_payload(metadata) -> dict:
-    """元数据十个字段（值 + 来源 + 是否找到 + 警告备注），前端据此显示并允许人工修正"""
+def metadata_payload(metadata, edits=None) -> dict:
+    """
+    元数据十个字段：**人工修正优先**，同时把自动提取的原值也带上。
+
+    前端据此可以：① 显示你改过的值；② 标出哪些是被你改过的（`edited`）；③ 一键"还原成
+    自动提取结果"（`auto` 字段，不需要再问服务端）。
+    """
+    edits = edits or {}
     specs = (
         ("title", "标题", metadata.title),
         ("doi", "DOI", metadata.doi),
@@ -110,9 +144,15 @@ def metadata_payload(metadata) -> dict:
     )
     out = {}
     for key, label, field in specs:
+        store_key = EDIT_KEYS[key]
+        auto_value = field.value or ""
+        edited = store_key in edits
         out[key] = {
             "label": label,
-            "value": field.value or "",
+            "value": edits.get(store_key, auto_value),
+            "auto": auto_value,
+            "edited": edited,
+            "store_key": store_key,
             "source": getattr(field, "source", "") or "",
             "found": bool(getattr(field, "found", False)),
             "note": getattr(field, "note", "") or "",
@@ -143,7 +183,8 @@ def overview_payload(result, cards, images, table_regions) -> dict:
 
 
 def build_paper_payload(pdf_bytes, file_name, parse_result, image_result, association,
-                        metadata, position=0, cache_hit=False, backend=None, target="zh") -> dict:
+                        metadata, position=0, cache_hit=False, backend=None, target="zh",
+                        edits=None) -> dict:
     """
     汇总成一次 `/api/open` 的响应。
 
@@ -173,7 +214,7 @@ def build_paper_payload(pdf_bytes, file_name, parse_result, image_result, associ
         "cache_hit": bool(cache_hit),
         "position": int(position or 0),
         "overview": overview_payload(parse_result, cards, images, table_regions),
-        "metadata": metadata_payload(metadata),
+        "metadata": metadata_payload(metadata, edits),
         "cards": payload_cards,
         "backend": backend,
         "target": target,

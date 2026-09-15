@@ -124,6 +124,8 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/img/"):
             return self._api_image(path.rsplit("/", 1)[-1],
                                    parse_qs(urlparse(self.path).query).get("size", ["thumb"])[0])
+        if path == "/api/pending":
+            return self._api_pending()
         if path == "/api/status":
             return self._api_status()
         return self._send_error_json("没有这个地址：" + path, code=404)
@@ -137,6 +139,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_translate()
             if path == "/api/position":
                 return self._api_position()
+            if path == "/api/metadata":
+                return self._api_metadata()
+            if path == "/api/metadata/reset":
+                return self._api_metadata_reset()
+            if path == "/api/cache/clear":
+                return self._api_cache_clear()
         except ValueError as exc:                       # 预期内的输入问题
             return self._send_error_json(str(exc), code=400)
         except Exception as exc:                        # 兜底：任何异常都别让服务崩掉
@@ -160,6 +168,15 @@ class Handler(BaseHTTPRequestHandler):
         if not blob:
             return self._send_error_json("取不到这张图（可能换了一篇文献）", code=404)
         self._send(200, blob, "image/png", {"Cache-Control": "public, max-age=600"})
+
+    def _api_pending(self):
+        """整篇翻译用的待译清单（前端分批调用 /api/translate，自带进度）"""
+        backend = current_backend()
+        if not backend:
+            return self._send_json({"ok": False, "texts": [],
+                                    "error": "没有可用的翻译后端：请在 .env 里配置 API Key"})
+        texts = STATE.pending_texts(backend, "zh")
+        self._send_json({"ok": True, "texts": texts, "count": len(texts), "backend": backend})
 
     def _api_open(self):
         pdf = self._read_body()
@@ -196,9 +213,35 @@ class Handler(BaseHTTPRequestHandler):
         ok = STATE.save_position(body.get("index", 0))
         self._send_json({"ok": ok})
 
+    def _api_metadata(self):
+        """保存人工修正的元数据（键沿用 Streamlit 版那套 in_xxx，两个前端共用一份记录）"""
+        body = self._read_json()
+        result = STATE.save_metadata(body.get("edits") or {})
+        result["metadata"] = STATE.refresh_metadata_view()
+        self._send_json(result)
+
+    def _api_metadata_reset(self):
+        """丢掉人工修正，回到自动提取的值"""
+        result = STATE.clear_metadata_edits()
+        result["metadata"] = STATE.refresh_metadata_view()
+        self._send_json(result)
+
+    def _api_cache_clear(self):
+        body = self._read_json()
+        scope = body.get("scope") or "paper"
+        if scope not in ("paper", "all"):
+            return self._send_error_json("scope 只能是 paper 或 all", code=400)
+        result = STATE.clear_cache(scope)
+        stats = store.cache_stats()
+        result["cache"] = {"papers": stats.get("papers", 0),
+                           "translations": stats.get("translations", 0),
+                           "kb": round((stats.get("bytes", 0) or 0) / 1024, 1)}
+        self._send_json(result)
+
     def _api_status(self):
         stats = store.cache_stats()
         backend = current_backend()
+        pending = STATE.pending_texts(backend, "zh") if backend else []
         self._send_json({
             "ok": True,
             "has_paper": STATE.pdf_bytes is not None,
@@ -207,6 +250,7 @@ class Handler(BaseHTTPRequestHandler):
             "cache_hit": STATE.cache_hit,
             "backend": backend,
             "coverage": STATE.coverage(backend, "zh") if backend else {},
+            "pending_count": len(pending),
             "cache": {"papers": stats.get("papers", 0),
                       "translations": stats.get("translations", 0),
                       "kb": round((stats.get("bytes", 0) or 0) / 1024, 1),

@@ -18,6 +18,7 @@ const state = {
   lang: 'zh',
   height: 'normal',
   immersive: false,
+  dark: false,
   translations: new Map(),   // 原文 → 译文（会话内缓存；服务端还有一份磁盘缓存）
   busy: 0,
   pendingIndex: null,
@@ -30,7 +31,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"]/g,
 function savePrefs() {
   try {
     localStorage.setItem(LS_KEY, JSON.stringify(
-      { lang: state.lang, height: state.height, immersive: state.immersive }));
+      { lang: state.lang, height: state.height, immersive: state.immersive, dark: state.dark }));
   } catch (e) { /* 隐私模式下写不了，忽略 */ }
 }
 function loadPrefs() {
@@ -41,6 +42,7 @@ function loadPrefs() {
     state.lang = data.lang || 'zh';
     state.height = data.height || 'normal';
     state.immersive = !!data.immersive;
+    state.dark = !!data.dark;
   } catch (e) { /* 坏了就用默认值 */ }
 }
 
@@ -184,7 +186,11 @@ function renderChrome() {
   $('btn-immersive').textContent = state.immersive ? '⤡ 退出沉浸' : '⤢ 沉浸模式';
   $('btn-immersive').setAttribute('aria-pressed', String(state.immersive));
   $('btn-immersive').classList.toggle('on', state.immersive);
-  document.body.className = 'h-' + state.height + (state.immersive ? ' immersive' : '');
+  $('btn-theme').textContent = state.dark ? '☀️ 亮色' : '🌙 暗色';
+  $('btn-theme').classList.toggle('on', state.dark);
+  // 主题与高度都只是 body 上的一个 class（自建前端的好处：样式全在自己手里）
+  document.body.className = 'h-' + state.height
+    + (state.immersive ? ' immersive' : '') + (state.dark ? ' dark' : '');
   $('doc-title').textContent = paper ? `${paper.file.name} · ${paper.overview.layouts}` : $('doc-title').textContent;
   $('pill-cache').textContent = paper
     ? (paper.cache_hit ? '♻️ 命中本地缓存' : '🆕 首次解析')
@@ -199,13 +205,21 @@ function renderMeta() {
   $('meta-title').textContent = meta.title.value || '（未识别到标题）';
   const order = ['doi', 'authors', 'first_author', 'corresponding', 'corresponding_email',
     'affiliations', 'supplementary', 'author_emails'];
-  $('meta-list').innerHTML = order.map((key) => {
-    // 防御式取字段：后端一定会给全十项，但界面不该因为少一项就整页崩掉
-    const field = meta[key] || { label: key, value: '', source: '', found: false, note: '' };
-    const value = (field.value || '（未找到）').replace(/\n/g, '　');
-    const flag = field.found ? '' : ' ⚠️';
-    return `<dt>${esc(field.label)}${flag}</dt><dd>${esc(value.slice(0, 300))}`
-      + `<span class="src">来源：${esc(field.source || field.note || '—')}</span></dd>`;
+  // 十个字段都是**可编辑**的：改完失焦即保存（写到本地记录里，两个前端共用）
+  const short = ['doi', 'first_author', 'corresponding', 'corresponding_email'];
+  const fields = ['title', 'abstract'].concat(order);
+  $('meta-form').innerHTML = fields.map((key) => {
+    const field = meta[key] || { label: key, value: '', auto: '', source: '', found: false, note: '' };
+    const rows = (key === 'abstract' || key === 'authors' || key === 'affiliations'
+      || key === 'supplementary') ? 4 : (short.includes(key) ? 1 : 2);
+    const tag = rows > 1
+      ? `<textarea rows="${rows}" data-key="${esc(field.store_key || key)}">${esc(field.value || '')}</textarea>`
+      : `<input type="text" data-key="${esc(field.store_key || key)}" value="${esc(field.value || '')}">`;
+    const flag = field.found ? '' : ' ⚠️ 未找到';
+    const edited = field.edited ? '<span class="edited">✎ 已人工修正</span>' : '';
+    const note = field.note ? ` · ${esc(field.note)}` : '';
+    return `<div class="field"><label>${esc(field.label)}${flag} ${edited}</label>${tag}`
+      + `<span class="src">来源：${esc(field.source || '—')}${note}</span></div>`;
   }).join('');
   const ov = paper.overview;
   $('overview').innerHTML = [
@@ -213,15 +227,135 @@ function renderMeta() {
     ['插图', ov.images + ' 张'], ['公式区域', ov.formula_regions], ['表格区域', ov.table_regions],
     ['正文字号', ov.body_size + ' pt'], ['解析耗时', ov.elapsed + ' 秒'],
   ].map(([k, v]) => `<div class="kv"><span>${esc(k)}</span><span>${esc(v)}</span></div>`).join('');
-  const cache = paper.cache;
-  $('cache-info').innerHTML = `缓存目录：<code>${esc(cache.root)}</code><br>`
-    + `已保存 <b>${cache.papers}</b> 篇文献记录 · 译文 <b>${cache.translations}</b> 条 · `
-    + `占用 <b>${cache.kb}</b> KB<br>`
-    + `图片不落盘：插图与区域截图按需渲染。`;
   $('status').innerHTML = `✅ ${esc(paper.file.name)}<br>`
     + `文本 ${ov.pages} 页 / ${ov.cards} 张卡 · 插图 ${ov.images} 张<br>`
     + `${paper.cache_hit ? '♻️ 已命中本地记录，接着上次读' : '🆕 已写入本地缓存'}`
     + `${paper.backend ? ' · 翻译后端 ' + esc(paper.backend) : ' · ⚠️ 没有可用翻译后端'}`;
+  renderCache(paper.cache);
+  refreshCoverage();
+}
+
+function renderCache(cache) {
+  if (!cache) return;
+  $('cache-info').innerHTML = `缓存目录：<code>${esc(cache.root || '')}</code><br>`
+    + `已保存 <b>${cache.papers}</b> 篇文献记录 · 译文 <b>${cache.translations}</b> 条 · `
+    + `占用 <b>${cache.kb}</b> KB<br>`
+    + `图片不落盘：插图与区域截图按需渲染。`;
+}
+
+/* 译文覆盖度：告诉用户"断网前还差多少"，并给一个一次补齐的入口 */
+async function refreshCoverage() {
+  if (!state.paper) { $('coverage').textContent = '未打开文献。'; return; }
+  try {
+    const status = await api('/api/status');
+    const cov = status.coverage || {};
+    const pending = status.pending_count || 0;
+    const total = cov.cards || 0;
+    const covered = cov.covered_cards || 0;
+    $('coverage').innerHTML = `已能离线读中文：<b>${covered} / ${total}</b> 张卡 · `
+      + `段落 <b>${cov.covered_texts || 0} / ${cov.texts || 0}</b> 段`
+      + (pending ? `<br>还有 <b>${pending}</b> 段没有译文（没翻到的卡片不会自动翻译）。`
+                 : '<br>整篇都有译文了：断网也能看中文。');
+    $('btn-translate-all').textContent = pending
+      ? `🌐 翻译整篇（补齐 ${pending} 段）` : '🌐 整篇都译好了';
+    $('btn-translate-all').disabled = !pending;
+    if (!status.backend) $('coverage-note').textContent = '⚠️ 没有可用的翻译后端（请在 .env 里配置 Key）。';
+  } catch (e) { /* 状态拿不到就不显示，不影响阅读 */ }
+}
+
+/* 翻译整篇：取待译清单 → 分批调用 /api/translate → 进度条推进；已译段落不会重复请求 */
+async function translateAll() {
+  const button = $('btn-translate-all');
+  button.disabled = true;
+  try {
+    const pending = await api('/api/pending');
+    if (!pending.ok) { alert(pending.error || '没有可用的翻译后端'); return; }
+    const texts = pending.texts || [];
+    if (!texts.length) { await refreshCoverage(); return; }
+    const chunk = 20;
+    let done = 0;
+    for (let start = 0; start < texts.length; start += chunk) {
+      const batch = texts.slice(start, start + chunk);
+      const result = await api('/api/translate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ texts: batch, target: 'zh' }),
+      });
+      if (!result.ok) { alert('翻译中断：' + (result.error || '未知原因')); break; }
+      batch.forEach((text, k) => { if (result.translations[k]) state.translations.set(text, result.translations[k]); });
+      done += batch.length;
+      $('cov-bar').style.width = Math.round((done / texts.length) * 100) + '%';
+      $('coverage-note').textContent = `正在翻译整篇… ${done} / ${texts.length} 段`;
+    }
+    $('coverage-note').textContent = `整篇翻译完成：本次处理 ${done} 段（已存到本地缓存）。`;
+    if (state.lang === 'zh') renderCard(false);
+    await refreshCoverage();
+  } catch (err) {
+    alert('翻译整篇失败：' + err.message);
+  } finally {
+    button.disabled = false;
+    setTimeout(() => { $('cov-bar').style.width = '0%'; }, 1200);
+  }
+}
+
+/* 元数据保存：把十个输入框的值一起发给服务端（服务端会过滤掉与自动提取相同的项） */
+async function saveMetadata() {
+  if (!state.paper) return;
+  const edits = {};
+  document.querySelectorAll('#meta-form [data-key]').forEach((el) => {
+    edits[el.dataset.key] = el.value;
+  });
+  try {
+    const result = await api('/api/metadata', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ edits }),
+    });
+    if (result.metadata) state.paper.metadata = result.metadata;
+    $('meta-saved').textContent = '已保存到本地缓存 ✓';
+    $('meta-title').textContent = result.metadata.title.value || '（未识别到标题）';
+  } catch (err) {
+    $('meta-saved').textContent = '保存失败：' + err.message;
+  }
+}
+
+async function resetMetadata() {
+  if (!state.paper) return;
+  try {
+    const result = await api('/api/metadata/reset', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    if (result.metadata) state.paper.metadata = result.metadata;
+    renderMeta();
+    $('meta-saved').textContent = '已还原为自动提取的结果';
+  } catch (err) {
+    $('meta-saved').textContent = '还原失败：' + err.message;
+  }
+}
+
+async function clearCache(scope) {
+  const message = scope === 'all'
+    ? '清空全部缓存：所有文献记录与全部译文都会被删除（下次阅读会重新解析、重新翻译）。继续？'
+    : '只清除这篇文献的本地记录（元数据修正与阅读位置）；译文是全局的，不受影响。继续？';
+  if (!confirm(message)) return;
+  try {
+    const result = await api('/api/cache/clear', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope }),
+    });
+    if (scope === 'all') {
+      state.translations.clear();
+      state.paper.cache_hit = false;
+      renderCard(false);
+    } else {
+      state.paper.cache_hit = false;
+      state.paper.metadata = Object.fromEntries(Object.entries(state.paper.metadata)
+        .map(([k, v]) => [k, v.value === undefined ? v : { ...v, value: v.auto, edited: false }]));
+      renderMeta();
+    }
+    if (result.cache) renderCache({ ...state.paper.cache, ...result.cache });
+    $('meta-saved').textContent = scope === 'all' ? '已清空全部缓存' : '已清除本篇记录';
+  } catch (err) {
+    alert('清除失败：' + err.message);
+  }
 }
 
 function renderAll() {
@@ -271,6 +405,12 @@ function setImmersive(on) {
   updateScrollHint();
 }
 
+function setDark(on) {
+  state.dark = on;
+  savePrefs();
+  renderChrome();
+}
+
 /* 「还能往下滚」提示：内容超出卡片高度、且还没滚到底时显示 */
 function updateScrollHint() {
   const deck = $('deck'), wrap = $('deck-wrap');
@@ -310,6 +450,19 @@ function bind() {
     state.height = btn.dataset.h; savePrefs(); renderChrome(); updateScrollHint();
   });
   $('btn-immersive').addEventListener('click', () => setImmersive(!state.immersive));
+  $('btn-theme').addEventListener('click', () => setDark(!state.dark));
+  $('btn-translate-all').addEventListener('click', translateAll);
+  $('btn-meta-reset').addEventListener('click', resetMetadata);
+  $('btn-clear-one').addEventListener('click', () => clearCache('paper'));
+  $('btn-clear-all').addEventListener('click', () => clearCache('all'));
+
+  // 元数据输入框：失焦即保存（含文本域），Ctrl+Enter 也算
+  $('meta-form').addEventListener('change', (e) => {
+    if (e.target && e.target.dataset && e.target.dataset.key) saveMetadata();
+  });
+  $('meta-form').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) saveMetadata();
+  });
 
   $('prev').addEventListener('click', () => goto(state.i - 1, true));
   $('next').addEventListener('click', () => goto(state.i + 1, false));

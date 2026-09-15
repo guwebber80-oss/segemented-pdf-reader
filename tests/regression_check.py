@@ -63,7 +63,7 @@ PROJECT_SUITES = [
     ("阶段 6.2 明暗模式切换（25 条断言）", "test_theme.py"),
     ("阶段 6.4 译文覆盖与整篇翻译（24 条断言）", "test_translate_plan.py"),
     ("阶段 6.6 卡片固定高度 + 卡内滚动（11 条断言）", "test_layout.py"),
-    ("阶段 7.1 网页版载荷层（16 条断言）", "test_webapp_payload.py"),
+    ("阶段 7.1/7.2 网页版载荷层（22 条断言）", "test_webapp_payload.py"),
 ]
 
 # 允许变化、不参与判定的字段
