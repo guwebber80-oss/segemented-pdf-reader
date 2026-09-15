@@ -1132,6 +1132,7 @@ with st.expander("🔍 解析诊断（验证阅读顺序、定位双栏错位）
             "页码": region.page,
             "判据": "题注" if region.kind == "captioned" else "几何兜底（无题注）",
             "行×列": f"{region.rows} × {region.columns}",
+            "表注行": region.notes,
             "区域范围": f"({region.rect[0]:.0f}, {region.rect[1]:.0f})"
                         f"–({region.rect[2]:.0f}, {region.rect[3]:.0f})",
             "题注": region.caption[:40],

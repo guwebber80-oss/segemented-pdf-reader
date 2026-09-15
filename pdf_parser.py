@@ -272,7 +272,7 @@ def column_margins(blocks) -> dict:
     return margins
 
 
-def mark_formula_tiers(blocks, margins: dict) -> None:
+def mark_formula_tiers(blocks, margins: dict, excluded=frozenset()) -> None:
     """
     给每个块标出公式等级（就地写 formula_tier）：
 
@@ -288,7 +288,14 @@ def mark_formula_tiers(blocks, margins: dict) -> None:
       · 提取阶段已经拆出来的公式行有结构证据（居中 + 数学字体 + 符号密度），
         直接算强候选，但仍然要过一遍「单独成图」的防线，没过就降为弱候选。
     """
-    for block in blocks:
+    for index, block in enumerate(blocks):
+        if index in excluded:
+            # 「保留文字」模式下的表格区域：表格文字照旧留在卡片里，
+            # 但不参与公式判定——否则表格里的 "β = 13.85" 这类单元格会被
+            # 碎片堆规则聚成一张公式图，在表格文字中间冒出一张图。
+            block.formula_tier = ""
+            block.is_formula = False
+            continue
         if block.role not in READING_ROLES or block.kind == "heading":
             block.formula_tier = ""
             block.is_formula = False
@@ -307,6 +314,14 @@ def mark_formula_tiers(blocks, margins: dict) -> None:
                 "strong" if formula_finder.passes_standalone_guards(block, margin) else "weak")
         else:
             block.formula_tier = formula_finder.classify(block, margin)
+
+    # ---- 碎片堆 → 提升为强候选 ----
+    # 被排成上下叠放多块的显示公式（分数、分式方程组）常常**一块强候选都没有**，
+    # 聚类因此从不启动，这些公式既不出图、又作为乱码文字留在卡片里
+    # （用户验收时报的 npj 第 8、9 页正是这种情况）。这里按「同一处公式的碎片堆」
+    # 补一个种子，让聚类能正常启动。
+    for index in formula_finder.find_fragment_stacks(blocks):
+        blocks[index].formula_tier = "strong"
 
 
 def apply_clusters(blocks, clusters, reading_roles=READING_ROLES) -> None:
@@ -359,6 +374,31 @@ def repair_stats_symbols(text: str) -> str:
     """在统计量上下文里修回被字体错映射的希腊字母（ηp² / η²）"""
     for pattern, replacement in _STATS_SYMBOL_FIXES:
         text = pattern.sub(replacement, text)
+    return text
+
+
+# ④ 子集字体把**数学符号**错映射成别的字符的修复（第二种形态，2026-09-15 用户验收时发现）。
+#    真实案例：npj Digital Medicine 第 8 页的显示公式排成
+#        'GEVₑₘₒₜᵢₒₙ ¼ nᵉᵐᵒᵗⁱᵒⁿ'      ← ¼ 其实是 "="
+#        'Cði; jÞ'                      ← ð Þ 其实是括号
+#    这批 Adv* 子集字体（AdvMacMthSyN / AdvOT7d6df7ab.I）与 η→h 是同一类问题：
+#    字形到 Unicode 的映射被改写，原始信息丢失，只能按上下文修。
+#    为什么必须修：① 不修的话线性文本是乱码；② 公式判定的防线（括号配对、
+#    比较符两边要有操作数）全都过不了，显示公式因此**既没被截图、又留成乱码**。
+#    修复条件收紧到「同一行里出现上下标」：真公式必有上下标（实测这批公式全都有，
+#    例如 'Σ_{t=1}^{N}' 里的 'ₜ_¼₁' —— 那正是 t=1，反过来印证了 ¼ 就是等号），
+#    而正文里的 ¼（四分之一）不会跟上下标同现。第一版没加这条，实测把
+#    'about ¼ of the trials' 改成了 'about = of the trials'，所以必须卡住。
+_OBFUSCATED_EQUALITY_RE = re.compile(r"(?<=\w)\s*¼\s*(?=[\w(])")
+_SCRIPT_CHARS_RE = re.compile("[\u2070-\u209f\u1d2c-\u1d6a]")   # 上下标字符（含上标字母 ᵃᵉ 段）
+
+
+def repair_obfuscated_math(text: str) -> str:
+    """修回被 Adv* 子集字体错映射的数学符号（¼ → =、ð Þ → 括号）"""
+    if "ð" in text and text.count("ð") == text.count("Þ"):
+        text = text.replace("ð", "(").replace("Þ", ")")
+    if "¼" in text and _SCRIPT_CHARS_RE.search(text):
+        text = _OBFUSCATED_EQUALITY_RE.sub(" = ", text)
     return text
 
 
@@ -546,7 +586,7 @@ def _line_records(raw_block):
 
             parts.append(span_text)
 
-        text = "".join(parts)
+        text = repair_obfuscated_math("".join(parts))
         bbox = line.get("bbox") or (0.0, 0.0, 0.0, 0.0)
         records.append({
             "text": text,
@@ -1631,8 +1671,8 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
             gutter = detect_gutter(raw_blocks, page.rect.width)
             ordered = order_blocks(raw_blocks, gutter)
             blocks.extend(ordered)
-            if table_mode == "image":
-                page_lines[page_no] = raw_lines
+            # 行级数据两种模式都要（「保留文字」模式也要靠它把表格区域排除在公式判定之外）
+            page_lines[page_no] = raw_lines
 
             pages_meta.append({
                 "页码": page_no,
@@ -1665,18 +1705,26 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
         #      公式聚类之前（表格块先被认定，公式聚类就不会把单元格吸进公式图）。
         # 表格判定在**行层**做：Block 已经把同一行的多个单元格合并了，列对齐信息只在行层还在。
         margins = column_margins(blocks)
+        found_regions = table_finder.find_table_regions(blocks, page_lines, page_sizes,
+                                                        body_size=body_size)
         if table_mode == "image":
-            table_regions = table_finder.find_table_regions(blocks, page_lines, page_sizes)
-            apply_table_regions(blocks, table_regions)
+            apply_table_regions(blocks, found_regions)
             # 一行都没标上的区域不呈现（例如被排除的角色占满了），避免出现空图
-            table_regions = [region for region in table_regions
+            table_regions = [region for region in found_regions
                              if any(blocks[i].is_table for i in region.atom_indices)]
+            table_excluded = frozenset()
         else:
+            # 「保留文字」模式：表格文字照旧线性留在卡片里（与 4.4-B 之前一致），
+            # 但表格区域**不参与公式判定**——否则表格里的 "β = 13.85" 这类单元格
+            # 会被碎片堆规则聚成公式图，在表格文字中间冒出一张图（实测 npj 那篇
+            # 会比截图模式多出 3 个公式区域）。
             table_regions = []
+            table_excluded = frozenset(i for region in found_regions
+                                       for i in region.atom_indices)
 
         # ---- 五、公式：三级标记 → 区域聚类 → 确认的公式移出文字流 ----
         # 表格块已经在 mark_formula_tiers 里被排除，不会与表格图打架。
-        mark_formula_tiers(blocks, margins)
+        mark_formula_tiers(blocks, margins, excluded=table_excluded)
         clusters = formula_finder.find_formula_clusters(blocks, page_sizes, margins)
         apply_clusters(blocks, clusters)
         # 一个成员都没标上的簇（判定出来的块全在背景信息里）不呈现，避免出现空区域
