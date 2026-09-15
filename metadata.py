@@ -890,6 +890,7 @@ ICON_MIN_PT = 4.0          # 图标最小边长（比这更小的多半是标点
 ICON_MAX_PT = 20.0         # 图标最大边长（比这更大的多半是图或徽标）
 ICON_GAP_PT = 8.0          # 图标左边界与左侧文字之间的最大水平间距
 ICON_BAND_PAD_PT = 6.0     # 图标允许偏离作者行的纵向距离
+ICON_MIN_ITEMS = 6         # 图标最少绘制项数（见 _is_composite_icon：排除圆形徽章）
 
 
 def _byline_band(positioned):
@@ -919,10 +920,30 @@ def _page_spans(page):
     return spans
 
 
+def _is_composite_icon(drawing):
+    """
+    判断一个矢量绘制像不像「图标」，而不是圆形徽章 / 方框 / 色块。
+
+    为什么必须有这一步（真实误判案例，Nature Human Behaviour s41562-026-02534-0）：
+      作者名后面有一个**黑色 ORCID iD 圆形图标**——它是一个 4 段纯曲线的圆
+      （items=4，全部是 'c'），旁边还散着几块 <4pt 的白色镂空字母。
+      同一出版集团（Springer Nature）的真信封图标则是 **23 个绘制项**
+      （18 段直线 + 5 段曲线，npj Digital Medicine 同款）。
+      区分之前，那三个 ORCID 圆被当成了信封，把 3 位作者误判成通讯作者。
+
+    判据：图标是「复合图形」——绘制项数 ≥ ICON_MIN_ITEMS，且必须含有直线/矩形
+    （纯曲线的圆、单个矩形都排除）。这是形状特征，不依赖任何具体期刊的常量。
+    """
+    items = drawing.get("items") or []
+    if len(items) < ICON_MIN_ITEMS:
+        return False
+    return any(item[0] in ("l", "re", "qu") for item in items)
+
+
 def _icon_candidates(page, band):
     """
     作者行带子里的「小图形」——矢量绘制与小图片都算，因为不同期刊做法不同：
-    有的画矢量信封，有的放一张小位图。
+    有的画矢量信封，有的放一张小位图。矢量图形还要过一道 _is_composite_icon。
     """
     y0_limit, y1_limit = band
     candidates = []
@@ -932,6 +953,8 @@ def _icon_candidates(page, band):
                 and ICON_MIN_PT <= rect.height <= ICON_MAX_PT):
             continue
         if not (y0_limit <= rect.y0 <= y1_limit):
+            continue
+        if not _is_composite_icon(drawing):
             continue
         candidates.append((rect.x0, rect.y0, rect.x1, rect.y1, "矢量"))
     for info in page.get_image_info():
@@ -958,7 +981,9 @@ def find_icon_marked_authors(doc, positioned, authors):
     找「名字后面紧跟小图标」的作者——很多期刊用它标记通讯作者（信封图标）。
 
     判据三步：
-      ① 图标必须是作者行带子里的小图形（4~20pt，矢量或小图片）；
+      ① 图标必须是作者行带子里的小图形（4~20pt，矢量或小图片），
+         且矢量图形必须是**复合图形**（排除 ORCID 圆徽章之类的简单圆 / 方框，
+         见 _is_composite_icon——这一步是 Nature 样本误判 3 位作者后补上的）；
       ② 图标左边紧邻的文字（水平间距 ≤8pt、纵向有重叠）里，**最后一个**人名
          就是被标记的作者（图标总是紧跟在被标记的那个名字之后）；
       ③ 只认确实在作者列表里的人，且同一位作者只记一次。
@@ -974,20 +999,28 @@ def find_icon_marked_authors(doc, positioned, authors):
     spans = _page_spans(page)
     marked, seen = [], set()
     for x0, y0, x1, y1, kind in _icon_candidates(page, band):
-        best = None
-        for span in spans:
+        def _v_overlap(span) -> bool:
             sx0, sy0, sx1, sy1 = span["bbox"]
-            if not (sy0 - 2 <= y1 and sy1 + 2 >= y0):        # 纵向与图标重叠
-                continue
-            gap = x0 - sx1                                   # 图标左边界到文字右边界的距离
-            if -1.0 <= gap <= ICON_GAP_PT and (best is None or sx1 > best[1]):
-                best = (span["text"], sx1)
-        if best is None:
-            continue
+            return sy0 - 2 <= y1 and sy1 + 2 >= y0
 
-        names = split_name_list(best[0])
+        # 从右往左收集图标左侧的文字：
+        # 图标前面常常先是一个**上标编号 span**（"Wei Liu" 后面紧跟 "3"），
+        # 只取紧邻的那一个会拿不到人名 —— 所以要连续向左并，最多并 3 段，
+        # 直到能从拼起来的文字里解析出人名为止（并的间隔不超过 ICON_GAP_PT）。
+        left_spans = sorted([span for span in spans if _v_overlap(span) and span["bbox"][2] <= x0 + 1.0],
+                            key=lambda span: span["bbox"][2], reverse=True)
+        collected, names, right_edge = [], [], x0
+        for span in left_spans[:4]:
+            if right_edge - span["bbox"][2] > ICON_GAP_PT:
+                break
+            collected.insert(0, span["text"])
+            right_edge = span["bbox"][0]
+            names = split_name_list("".join(collected))
+            if names:
+                break
         if not names:
             continue
+
         matched = match_author(names[-1], authors)
         if not matched or matched in seen:
             continue
@@ -1104,13 +1137,16 @@ def extract_corresponding(blocks, authors, doc=None, positioned=None):
             email = ""
             # 先按「邮箱本地部分含这位作者的姓名」找（最可靠）
             for candidate_email, _source, _page, _x in ordered_emails:
-                local = candidate_email.split("@")[0]
-                if match_author(local, [name]):
+                if candidate_email.lower() in used_emails:      # 已被别人配走，别重复用
+                    continue
+                if match_author(candidate_email.split("@")[0], [name]):
                     email = candidate_email
                     break
             # 找不到就按页脚里邮箱的**左右顺序**依次配对（与图标的左右顺序一致）
             if not email and index < len(ordered_emails):
-                email = ordered_emails[index][0]
+                candidate_email = ordered_emails[index][0]
+                if candidate_email.lower() not in used_emails:
+                    email = candidate_email       # 同一个邮箱不会配给两位作者；配不到就留空
             if email:
                 used_emails.add(email.lower())
             pairs.append((name, email, how))
@@ -1357,7 +1393,10 @@ def extract_metadata(pdf_bytes: bytes, blocks=None) -> Metadata:
         names, author_source, author_note, positioned = extract_authors(blocks, title.value)
         affiliations, affiliation_source, affiliation_note = extract_affiliations(
             blocks, title.value, doc)
-        corresponding, corresponding_email = extract_corresponding(blocks, names, doc)
+        # 把作者位置（positioned）一并传进去：图标标记识别要用它确定「作者行带子」，
+        # 不传的话图标分支永远不会触发（该分支只认落在作者行附近的小图形）。
+        corresponding, corresponding_email = extract_corresponding(
+            blocks, names, doc, positioned=positioned)
         author_emails = extract_author_emails(
             author_zone(blocks, title.value)[0], positioned)
         supplementary, supplementary_items, supplementary_note = extract_supplementary(doc)
