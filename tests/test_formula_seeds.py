@@ -66,6 +66,13 @@ check("单独的 ¼（四分之一）不被改（正文语境）",
       repr(pdf_parser.repair_obfuscated_math("about ¼ of the trials")))
 check("单个 ð（不成对）不被改",
       pdf_parser.repair_obfuscated_math("the ð sound") == "the ð sound")
+# 用户报的第三处：等号被排到块首，旧版正则要求「¼ 前面有字符」→ 一直不匹配
+check("块首的 ¼ 也能修（'¼ Cði; jÞ P' → '= C(i; j) P'）",
+      pdf_parser.repair_obfuscated_math("¼ Cði; jÞ P").strip() == "= C(i; j) P",
+      repr(pdf_parser.repair_obfuscated_math("¼ Cði; jÞ P")))
+check("错映射括号授权的替换仍然安全（含 ð 与 ¼ 但没有括号对）",
+      pdf_parser.repair_obfuscated_math("the ð sound is ¼ of it") == "the ð sound is ¼ of it",
+      repr(pdf_parser.repair_obfuscated_math("the ð sound is ¼ of it")))
 
 print()
 print("② 目标样本：npj 第 8、9 页的显示公式现在被截成图")
@@ -75,11 +82,19 @@ else:
     result = analyze(NPJ)
     clusters = result["formula_clusters"]
     texts = " ".join(cluster.text for cluster in clusters)
-    check("公式区域从 1 处增加到 4 处", len(clusters) == 4, repr(len(clusters)))
-    check("4 处都在第 8、9 页", sorted({c.page for c in clusters}) == [8, 9],
+    check("公式区域共 5 处（含用户第二次报的那处分数）", len(clusters) == 5, repr(len(clusters)))
+    check("5 处都在第 8、9 页", sorted({c.page for c in clusters}) == [8, 9],
           repr(sorted({c.page for c in clusters})))
     check("含 'GEV…= n…'（此前完全没被识别）", "GEV" in texts)
     check("含 'Spearman' 那一处（大公式 Σ + 相关系数）", "Spearman" in texts)
+    check("含用户第二次报的 'C(i; j)' / 'C(i; k)' 那一处",
+          "C(i; j)" in texts and "C(i; k)" in texts,
+          texts[:120])
+    check("第 8 页那处分数（= C(i; j) P / P i; j / ₖ C(i; k)）在同一个区域里",
+          any("C(i; j)" in c.text and "C(i; k)" in c.text for c in clusters))
+    check("卡片正文里不再残留被错映射成控制字符的乱码块",
+          not any("\x01" in card.text or "\x06" in card.text for card in result["cards"]),
+          repr([card.text[:40] for card in result["cards"] if "\x01" in card.text][:2]))
     check("公式图真的进了卡片",
           sum(1 for card in result["cards"] for kind, _ in card.segments if kind == "formula")
           == len(clusters),

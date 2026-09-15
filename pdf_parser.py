@@ -389,15 +389,24 @@ def repair_stats_symbols(text: str) -> str:
 #    例如 'Σ_{t=1}^{N}' 里的 'ₜ_¼₁' —— 那正是 t=1，反过来印证了 ¼ 就是等号），
 #    而正文里的 ¼（四分之一）不会跟上下标同现。第一版没加这条，实测把
 #    'about ¼ of the trials' 改成了 'about = of the trials'，所以必须卡住。
-_OBFUSCATED_EQUALITY_RE = re.compile(r"(?<=\w)\s*¼\s*(?=[\w(])")
+#    注意正则**不能**要求 ¼ 前面有字符：实测有一处公式因为阅读顺序把等号排到了块首
+#    （'¼ C(i; j) P'），带 lookbehind 的版本直接不匹配，这处公式因此一直没出图。
+#    防误伤改由「同一行必须有上下标或错映射括号」这道语境门槛负责。
+_OBFUSCATED_EQUALITY_RE = re.compile(r"\s*¼\s*(?=[\w(])")
 _SCRIPT_CHARS_RE = re.compile("[\u2070-\u209f\u1d2c-\u1d6a]")   # 上下标字符（含上标字母 ᵃᵉ 段）
 
 
 def repair_obfuscated_math(text: str) -> str:
     """修回被 Adv* 子集字体错映射的数学符号（¼ → =、ð Þ → 括号）"""
-    if "ð" in text and text.count("ð") == text.count("Þ"):
+    # 证据必须在替换前判断：错映射的括号本身就是「这批字体」的直接证据
+    # （正常文字里不会成对出现 ð Þ），所以它和上下标一样能授权 ¼ → = 的替换。
+    # 实测踩过：'¼ Cði; jÞ P' 这行没有上下标、只有括号，旧版因此没修，
+    # 这处公式就少了等号证据、聚类起不来（用户报的第三个漏检公式）。
+    has_corrupt_parens = "ð" in text and text.count("ð") == text.count("Þ")
+    has_scripts = bool(_SCRIPT_CHARS_RE.search(text))
+    if has_corrupt_parens:
         text = text.replace("ð", "(").replace("Þ", ")")
-    if "¼" in text and _SCRIPT_CHARS_RE.search(text):
+    if "¼" in text and (has_scripts or has_corrupt_parens):
         text = _OBFUSCATED_EQUALITY_RE.sub(" = ", text)
     return text
 
@@ -586,7 +595,7 @@ def _line_records(raw_block):
 
             parts.append(span_text)
 
-        text = repair_obfuscated_math("".join(parts))
+        text = "".join(parts)
         bbox = line.get("bbox") or (0.0, 0.0, 0.0, 0.0)
         records.append({
             "text": text,
@@ -729,6 +738,10 @@ def _make_block(page_no: int, records, dehyphenate: bool):
     text = join_lines([r["text"] for r in records], dehyphenate).strip()
     text = add_script_spacing(text)
     text = repair_stats_symbols(text)
+    # 字形错映射的修复放在**块**这一层：门槛要看「整块里有没有上下标/错映射括号」，
+    # 只按行判断会漏——实测那处分数公式的 '¼' 与 'ð Þ' 分属两行，
+    # 逐行看谁都不满足条件，于是等号一直没修回来。
+    text = repair_obfuscated_math(text).strip()
     if not text:
         return None
 

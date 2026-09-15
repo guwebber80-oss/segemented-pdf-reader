@@ -72,6 +72,7 @@ WEAK_MIN = 2                  # 得分 2~3 算「弱候选」
 FRAGMENT_MAX_WORDS = 6        # 碎片的最长词数
 INDENT_MIN_PT = 8.0           # 相对所在栏边界的缩进量（公式通常缩进/居中）
 MAX_CLUSTER_BLOCKS = 15       # 单簇块数上限（防止吸进图注与正文）
+INNER_MAX_WORDS = 3           # 区域内部「收编」的最大词数（详见 find_formula_clusters 末尾）
 MAX_CLUSTER_AREA_RATIO = 0.20  # 单簇面积不超过页面的 20%
 PROJECTION_OVERLAP_MIN = 0.30  # x/y 投影重叠达到 30% 才算「对齐」
 ALIGNED_GAP_FACTOR = 1.0       # 投影对齐时，另一方向允许的间隙上限（× gap_limit）
@@ -392,6 +393,12 @@ def _gap(rect: tuple, atom) -> float:
     return max(dx, dy)
 
 
+def _inside(rect: tuple, atom, tol: float = 1.0) -> bool:
+    """这个块是不是**完全落在**矩形里（用来收编区域内部那些没有公式等级的符号块）"""
+    return (rect[0] - tol <= atom.x0 and atom.x1 <= rect[2] + tol
+            and rect[1] - tol <= atom.y0 and atom.y1 <= rect[3] + tol)
+
+
 def _same_line(rect: tuple, atom) -> bool:
     """
     候选块与当前簇在**同一行**上吗（y 范围重叠超过较矮者高度的一半）。
@@ -609,6 +616,24 @@ def grow_clusters(atoms, page_sizes: dict, margins: dict, claimed: set, start_id
                     # 面积超限：退掉最后吸收的那一块，停止生长
                     if len(members) > 1:
                         used.discard(members.pop())
+                    break
+
+            # 最后：把**完全落在区域矩形内**的极短块也收进来。
+            # 这类块是公式里被字体错映射成控制字符的符号（实测 npj 第 8 页那处
+            # 分数里的 '\x01 \x03'），它们没有公式等级、不会被上面的规则吸收，
+            # 于是既留在文字流里显示成乱码、又本来就包含在图片范围内——重复且难看。
+            rect_final = _union_rect([atoms[i] for i in members])
+            for candidate_index in indices:
+                if candidate_index in used:
+                    continue
+                candidate = atoms[candidate_index]
+                if candidate.role != "body" or count_words(candidate.text) > INNER_MAX_WORDS:
+                    continue
+                if not _inside(rect_final, candidate):
+                    continue
+                members.append(candidate_index)
+                used.add(candidate_index)
+                if len(members) >= MAX_CLUSTER_BLOCKS:
                     break
 
             member_atoms = [atoms[i] for i in members]
