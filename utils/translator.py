@@ -29,7 +29,10 @@ DEFAULT_TIMEOUT = 20      # 单次请求超时（秒）
 MAX_RETRIES = 3           # 失败重试次数（含第一次）
 RETRY_BACKOFF = 0.6       # 重试间隔基数：0.6s、1.2s……
 
-ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+# .env 在**项目根目录**（阶段 5 把模块收进 utils/ 后要多回上一层，
+# 否则会去找 utils/.env、Key 永远读不到——实测这就是移动后翻译静默失效的原因）
+ENV_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
 
 # 后端显示名（界面用）
 BACKEND_LABELS = {

@@ -17,26 +17,32 @@
 
 ```
 segemented-pdf-reader/
-├── app.py                 # 主程序（Streamlit 界面层）
-├── pdf_parser.py          # PDF 解析逻辑（不依赖 Streamlit，可单独测试）
-├── formula_finder.py      # 公式锚点表 / 三级判据 / 区域聚类（也不依赖 Streamlit）
-├── translator.py          # 翻译逻辑（DeepL / OpenAI / Google，带超时与重试）
-├── image_extractor.py     # 图片提取（缩略图、按需渲染大图、与卡片关联）
-├── metadata.py            # 文献元数据（标题 / DOI / 摘要）
+├── app.py                 # 唯一入口：Streamlit 界面层 + 流程编排
+├── utils/                 # 核心逻辑（不依赖 Streamlit，可脱离网页单独测试）
+│   ├── __init__.py        #   包说明与分层约定
+│   ├── pdf_parser.py      #   PDF → 原子块 / 段落 / 卡片（含表格与公式的接线）
+│   ├── formula_finder.py  #   公式锚点表 / 三级判据 / 区域聚类
+│   ├── table_finder.py    #   表格区域识别（题注锚点 + 对齐列几何校验）
+│   ├── image_extractor.py #   图片提取、卡片关联、区域截图渲染
+│   ├── metadata.py        #   元数据（标题/DOI/摘要/作者/通讯作者/单位/附件链接）
+│   ├── grobid_client.py   #   GROBID 本地服务客户端（第二意见）
+│   ├── metadata_compare.py#   本地结果与 GROBID 的逐字段对照（只补空、不覆盖）
+│   └── translator.py      #   翻译（DeepL / OpenAI / Google，带超时与重试）
+├── tests/                 # 验收断言 + 回归比对（见「版本管理与回滚」）
 ├── requirements.txt       # 依赖清单
 ├── .env.example           # 环境变量模板（复制成 .env 后填 Key）
 ├── .gitignore             # 排除 .env / .venv / __pycache__ / *.pdf 等
-├── README.md              # 本文件
-└── utils/                 # （阶段 5 代码重构时创建）
-    ├── pdf_parser.py      # 由根目录的 pdf_parser.py 搬入
-    ├── translator.py      # 翻译接口封装
-    └── metadata.py        # 元数据提取与回退策略
+├── 启动阅读器.bat          # 双击启动（含依赖自检与 GROBID 拉起）
+├── 回归检查.bat            # 双击做全样本回归（基线比对 + 全部验收套件）
+└── README.md              # 本文件
 ```
 
-**为什么解析逻辑单独一个文件**：它不依赖 Streamlit，可以脱离网页直接跑、直接调试；
-调算法时不用碰界面代码。阶段 5 会把它搬进 `utils/`。
+**为什么核心逻辑都在 `utils/` 且不依赖 Streamlit**：可以脱离网页直接跑、直接调试；
+调算法时不用碰界面代码，测试也能用普通 `python tests/xxx.py` 跑。
+包内模块之间用**相对导入**（`from . import formula_finder`），
+外部（`app.py`、`tests/`）用 `from utils import pdf_parser`。
 
-**公式判定为什么再拆一个模块**：判据（锚点表 + 三级分类）和聚类算法加起来逻辑量很大，
+**公式判定为什么单独一个模块**：判据（锚点表 + 三级分类）和聚类算法加起来逻辑量很大，
 混在解析器里会让 `pdf_parser.py` 难以维护；拆出来之后可以单独跑、单独验证。
 它不反向依赖 `pdf_parser`，只按鸭子类型读原子块的属性。
 
