@@ -3,21 +3,22 @@ ui.layout —— 阅读布局的纯逻辑（阶段 6.5：固定页面 / 卡内�
 
 三件事的来龙去脉见 README 的阶段 6.5；这里只记**为什么这么做**：
 
-1) **滚动用原生 `st.container(height=N)`，不靠自定义 CSS**
-   2026-09-16 的教训：先做了一版「CSS 注入 `calc(100vh - Npx)` + `overflow-y:auto`」，
-   用户反馈「功能未实现」——那条链路（`st.markdown` 里塞 `<style>` + 靠类名命中容器）
-   在他的环境里没能生效，而我在沙箱里既没有浏览器、也无法逐条排除。
-   既然 Streamlit 明确支持固定高度的可滚动容器，就改成用它：**官方 API，不赌**。
-   代价是高度只能给像素（`vh` 拿不到视口高度），所以做成「卡片高度：矮 / 中 / 高」三档。
+1) **为什么用 `st-key-<key>` 而不是 `data-testid`**
+   Streamlit 前端（1.63 bundle 里 `function Af(e){return e?`st-key-`+e.trim().replace(...)`}`）
+   会给带 `key` 的容器加上 `st-key-<key>` 类名，这是**官方约定**；而 `data-testid="stColumn"`
+   之类是内部结构，随版本就变（6.3 的分析里已把它列为不可靠做法）。所以本模块只生成
+   `.st-key-xxx` 选择器，并在测试里断言「绝不出现 data-testid」。
 
-2) **CSS 只保留两件只有 CSS 能做的事**
-   ① 沉浸模式隐藏左右两栏（`display:none`）；② 滚动条做细一点。
-   类名用 `st-key-<key>`——这是 Streamlit 官方约定（前端会给带 key 的容器加这个类），
-   不能用 `data-testid` 之类内部结构（会随版本变）。测试里有一条断言禁止出现内部选择器。
-   类名重复写两遍（`.st-key-x.st-key-x`）是为了提高优先级，不必用 `!important`。
+2) **为什么用 `calc(100vh - Npx)` 而不是 `st.container(height=N)`**
+   Streamlit 不把视口高度交给 Python（6.3 已核对），写死像素会在小屏上把页面顶出滚动条、
+   在大屏上留一大截空白。用 vh 让浏览器自己算，N 只表示「装饰部分」（页头、标题、进度条、
+   内边距）的高度估计，做成「卡片高度：矮 / 中 / 高」三档让用户按显示器挑。
 
 3) **必须有回退开关**（本项目对判据/布局类改动的纪律）
-   关掉「卡内滚动」→ 不再给容器传 `height=`、也不再注入滚动条样式 = 完全回到改动前的行为。
+   `layout_css(scroll=False)` 返回空字符串 = 完全回到改动前的行为。
+
+类名重复写两遍（`.st-key-x.st-key-x`）是为了提高优先级：Streamlit 自己的样式表也是单类选择器，
+同优先级下谁后注入谁赢，写两遍就不用赌顺序，也不必用 `!important`。
 """
 
 import streamlit as st
@@ -29,20 +30,17 @@ IMMERSIVE_KEY = "ui_immersive"        # 沉浸模式：隐藏左右两栏
 SCROLL_KEY = "ui_scroll_layout"       # 卡内滚动开关（回退用）
 HEIGHT_KEY = "ui_card_height"         # 卡片高度档位
 
-# ---------------- 三块滚动区域的 key（CSS 靠它们定位，容器也靠它们带 key） ----------------
+# ---------------- 三块滚动区域的 key（CSS 靠它们定位） ----------------
 KEY_LEFT_BOX = "reader_left_box"
 KEY_CARD = "reader_card"
 KEY_RIGHT_BOX = "reader_right_box"
 
-# ---------------- 高度档位（像素） ----------------
+# ---------------- 高度档位 ----------------
 DEFAULT_HEIGHT = "中"
-HEIGHT_PRESETS = {"矮": 360, "中": 440, "高": 520}
-SIDE_EXTRA = 120          # 左右两栏比卡片高一点：栏里没有页头与进度条占位
-
-# 沉浸模式：左右两栏压到 1px 高（内容被裁掉，但控件照常渲染 → 状态不丢）。
-# 为什么不用 CSS display:none 单独搞定：那条链路在用户环境里没能生效（见模块开头 ①），
-# 所以用「原生 1px 容器 + 列宽压到 0.0001」做**不依赖 CSS** 的隐藏；CSS 那条只当锦上添花。
-IMMERSIVE_BOX_HEIGHT = 1
+# 「装饰部分」的像素估计：卡片区要用 100vh 减掉它（页头 + 文件信息 + 标题 + 进度条 + 内边距）
+HEIGHT_OFFSETS = {"矮": 380, "中": 320, "高": 260}
+# 左右两栏要减掉的（页头 + 内边距，栏里没有别的装饰）
+SIDE_OFFSET = 150
 
 # 沉浸模式下左右栏的列宽：给到极小而不是 0，Streamlit 仍然会渲染它们
 # （控件照常创建 → 上传的文件、语言、设置都不会被 Streamlit 回收掉），
@@ -51,45 +49,9 @@ IMMERSIVE_SPEC = [0.0001, 9.0, 0.0001]
 NORMAL_SPEC = [0.85, 2.7, 1.05]
 
 
-def card_height(mode: str) -> int:
-    """档位名 → 卡片区高度（像素）；不认识的档位退回默认档"""
-    return HEIGHT_PRESETS.get(mode, HEIGHT_PRESETS[DEFAULT_HEIGHT])
-
-
-def side_height(mode: str) -> int:
-    """档位名 → 左右两栏滚动区的高度（像素）"""
-    return card_height(mode) + SIDE_EXTRA
-
-
-def container_height(scroll: bool, mode: str, side: bool = False):
-    """
-    要不要给容器传 `height=`：关掉卡内滚动就返回 None（回到改动前的行为）。
-    None 的语义是「别传这个参数」，由调用方用 `box_kwargs()` 拼好。
-    """
-    if not scroll:
-        return None
-    return side_height(mode) if side else card_height(mode)
-
-
-def side_box_height(scroll: bool, mode: str, immersive: bool = False):
-    """
-    左右两栏的高度：
-      · 沉浸模式 → 1px（内容被裁掉看不见，但控件照常渲染，上传的文件/设置不会丢）
-      · 正常模式 → 档位对应的高度（关掉卡内滚动则 None = 不传 height）
-    """
-    if immersive:
-        return IMMERSIVE_BOX_HEIGHT
-    return side_height(mode) if scroll else None
-
-
-def card_box_height(scroll: bool, mode: str):
-    """卡片滚动区的高度（沉浸模式不影响它：沉浸不等于放弃卡内滚动）"""
-    return card_height(mode) if scroll else None
-
-
-def box_kwargs(height) -> dict:
-    """把「高度或 None」变成传给 `st.container()` 的 kwargs（None = 什么都不传）"""
-    return {} if height is None else {"height": height}
+def card_height_offset(mode: str) -> int:
+    """档位名 → 卡片区要减掉的像素（不认识的档位退回默认档）"""
+    return HEIGHT_OFFSETS.get(mode, HEIGHT_OFFSETS[DEFAULT_HEIGHT])
 
 
 def _cls(key: str) -> str:
@@ -99,17 +61,19 @@ def _cls(key: str) -> str:
 
 def layout_css(scroll: bool = True, immersive: bool = False, height: str = DEFAULT_HEIGHT) -> str:
     """
-    生成布局 CSS：只包含「滚动条样式」（可回退）与「沉浸模式隐藏两栏」。
-    两者都不需要时返回空字符串（= 不注入任何样式）。
-
-    height 参数目前不参与生成（高度改由原生 `height=` 决定），保留它是为了调用方签名稳定、
-    以及以后若要做「按 vh 微调」时有地方加。
+    生成布局 CSS。`scroll=False` 返回空串（完全回退到改动前的行为）。
     """
     rules = []
     if scroll:
         boxes = f"{_cls(KEY_LEFT_BOX)}, {_cls(KEY_RIGHT_BOX)}"
         card = _cls(KEY_CARD)
+        offset = card_height_offset(height)
         rules.append(
+            "/* 卡内滚动（阶段 6.5）：左右两栏与卡片各自滚动，整页不再跟着滚 */\n"
+            f"{boxes}{{height:calc(100vh - {SIDE_OFFSET}px);overflow-y:auto;"
+            "overscroll-behavior:contain;padding-right:4px}}\n"
+            f"{card}{{height:calc(100vh - {offset}px);overflow-y:auto;"
+            "overscroll-behavior:contain;padding-right:8px}}\n"
             "/* 滚动条做细一点，让人一眼看出「滚的是这一块」 */\n"
             f"{boxes}::-webkit-scrollbar,{card}::-webkit-scrollbar{{width:10px;height:10px}}\n"
             f"{boxes}::-webkit-scrollbar-thumb,{card}::-webkit-scrollbar-thumb"
@@ -118,8 +82,7 @@ def layout_css(scroll: bool = True, immersive: bool = False, height: str = DEFAU
             f"{boxes}, {card}{{scrollbar-width:thin;scrollbar-color:#c9d3e0 transparent}}"
         )
     if immersive:
-        # 沉浸模式：把左右两栏的内容藏掉
-        # （控件仍在脚本里被创建，状态不会丢——这一点有测试与冒烟守着）
+        # 沉浸模式：把左右两栏的内容藏掉（注意：控件仍在脚本里被创建，状态不会丢）
         rules.append(
             "/* 沉浸模式：隐藏左右两栏，只留卡片 */\n"
             f"{_cls(KEY_LEFT_BOX)}, {_cls(KEY_RIGHT_BOX)}{{display:none}}"
@@ -152,13 +115,14 @@ def ensure_layout_state() -> None:
     把布局相关的会话状态准备好（控件创建之前调用一次）。
 
     顺序：会话里已有就用会话里的（本次会话改过），否则读本地偏好 `.cache/ui.json`
-    （上次用的档位/沉浸状态），再否则用默认值。只补缺失的键，不覆盖用户在本次会话里的选择。
+    （上次用的档位/沉浸状态），再否则用默认值。
+    只补缺失的键，不覆盖用户在本次会话里的选择。
     """
     prefs = store.load_ui_prefs()
     defaults = {
         IMMERSIVE_KEY: bool(prefs.get("immersive", False)),
         SCROLL_KEY: bool(prefs.get("scroll", True)),
-        HEIGHT_KEY: prefs.get("height", DEFAULT_HEIGHT) if prefs.get("height") in HEIGHT_PRESETS
+        HEIGHT_KEY: prefs.get("height", DEFAULT_HEIGHT) if prefs.get("height") in HEIGHT_OFFSETS
                     else DEFAULT_HEIGHT,
     }
     for key, value in defaults.items():
