@@ -880,17 +880,169 @@ def match_author(query: str, authors):
     return None
 
 
+# ------------------------------------------------------------
+# 通讯作者的「图标标记」：很多期刊用一个小信封图标标在通讯作者名后面
+# ------------------------------------------------------------
+# 真实案例（npj Digital Medicine）：两位共同通讯作者，名字后面各有一个灰色信封图标，
+# 图标是**矢量绘制**（9.2×7.0pt、23 个绘制项），既不是文字也不是图片对象——
+# 只看文本的规则完全发现不了它。
+ICON_MIN_PT = 4.0          # 图标最小边长（比这更小的多半是标点或装饰线）
+ICON_MAX_PT = 20.0         # 图标最大边长（比这更大的多半是图或徽标）
+ICON_GAP_PT = 8.0          # 图标左边界与左侧文字之间的最大水平间距
+ICON_BAND_PAD_PT = 6.0     # 图标允许偏离作者行的纵向距离
+ICON_MIN_ITEMS = 6         # 图标最少绘制项数（见 _is_composite_icon：排除圆形徽章）
+
+
+def _byline_band(positioned):
+    """
+    作者行的纵向范围（positioned 是 [(名字, y, x), …]，由 extract_authors 产出）。
+
+    图标必须落在这个带子里才算「作者标记」；否则会把页眉徽标、CrossMark
+    「Check for updates」、图表里的小图标统统算进来。
+    """
+    if not positioned:
+        return None
+    ys = [y for _, y, _ in positioned]
+    return min(ys) - ICON_BAND_PAD_PT, max(ys) + ICON_BAND_PAD_PT + 8.0
+
+
+def _page_spans(page):
+    """取一页所有 span 的文本与 bbox（用来找图标左边紧邻的文字）"""
+    spans = []
+    for block in page.get_text("dict").get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                text = span.get("text", "")
+                if text.strip():
+                    spans.append({"text": text, "bbox": tuple(span["bbox"])})
+    return spans
+
+
+def _is_composite_icon(drawing):
+    """
+    判断一个矢量绘制像不像「图标」，而不是圆形徽章 / 方框 / 色块。
+
+    为什么必须有这一步（真实误判案例，Nature Human Behaviour s41562-026-02534-0）：
+      作者名后面有一个**黑色 ORCID iD 圆形图标**——它是一个 4 段纯曲线的圆
+      （items=4，全部是 'c'），旁边还散着几块 <4pt 的白色镂空字母。
+      同一出版集团（Springer Nature）的真信封图标则是 **23 个绘制项**
+      （18 段直线 + 5 段曲线，npj Digital Medicine 同款）。
+      区分之前，那三个 ORCID 圆被当成了信封，把 3 位作者误判成通讯作者。
+
+    判据：图标是「复合图形」——绘制项数 ≥ ICON_MIN_ITEMS，且必须含有直线/矩形
+    （纯曲线的圆、单个矩形都排除）。这是形状特征，不依赖任何具体期刊的常量。
+    """
+    items = drawing.get("items") or []
+    if len(items) < ICON_MIN_ITEMS:
+        return False
+    return any(item[0] in ("l", "re", "qu") for item in items)
+
+
+def _icon_candidates(page, band):
+    """
+    作者行带子里的「小图形」——矢量绘制与小图片都算，因为不同期刊做法不同：
+    有的画矢量信封，有的放一张小位图。矢量图形还要过一道 _is_composite_icon。
+    """
+    y0_limit, y1_limit = band
+    candidates = []
+    for drawing in page.get_drawings():
+        rect = drawing["rect"]
+        if not (ICON_MIN_PT <= rect.width <= ICON_MAX_PT
+                and ICON_MIN_PT <= rect.height <= ICON_MAX_PT):
+            continue
+        if not (y0_limit <= rect.y0 <= y1_limit):
+            continue
+        if not _is_composite_icon(drawing):
+            continue
+        candidates.append((rect.x0, rect.y0, rect.x1, rect.y1, "矢量"))
+    for info in page.get_image_info():
+        bbox = info["bbox"]
+        width, height = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        if not (ICON_MIN_PT <= width <= ICON_MAX_PT and ICON_MIN_PT <= height <= ICON_MAX_PT):
+            continue
+        if not (y0_limit <= bbox[1] <= y1_limit):
+            continue
+        candidates.append((bbox[0], bbox[1], bbox[2], bbox[3], "图片"))
+
+    # 同一个图标常由多个绘制对象拼成（描边 + 填充），按位置去重
+    unique = []
+    for candidate in sorted(candidates):
+        if any(abs(candidate[0] - item[0]) < 3 and abs(candidate[1] - item[1]) < 3
+               for item in unique):
+            continue
+        unique.append(candidate)
+    return unique
+
+
+def find_icon_marked_authors(doc, positioned, authors):
+    """
+    找「名字后面紧跟小图标」的作者——很多期刊用它标记通讯作者（信封图标）。
+
+    判据三步：
+      ① 图标必须是作者行带子里的小图形（4~20pt，矢量或小图片），
+         且矢量图形必须是**复合图形**（排除 ORCID 圆徽章之类的简单圆 / 方框，
+         见 _is_composite_icon——这一步是 Nature 样本误判 3 位作者后补上的）；
+      ② 图标左边紧邻的文字（水平间距 ≤8pt、纵向有重叠）里，**最后一个**人名
+         就是被标记的作者（图标总是紧跟在被标记的那个名字之后）；
+      ③ 只认确实在作者列表里的人，且同一位作者只记一次。
+
+    返回 [(作者名, 图标说明)]，按图标从左到右排序。找不到就返回空列表——
+    **不影响原有的文字标注 / 邮箱反查逻辑**（这一点由回归比对守着）。
+    """
+    band = _byline_band(positioned)
+    if doc is None or not doc.page_count or band is None or not authors:
+        return []
+
+    page = doc[0]
+    spans = _page_spans(page)
+    marked, seen = [], set()
+    for x0, y0, x1, y1, kind in _icon_candidates(page, band):
+        def _v_overlap(span) -> bool:
+            sx0, sy0, sx1, sy1 = span["bbox"]
+            return sy0 - 2 <= y1 and sy1 + 2 >= y0
+
+        # 从右往左收集图标左侧的文字：
+        # 图标前面常常先是一个**上标编号 span**（"Wei Liu" 后面紧跟 "3"），
+        # 只取紧邻的那一个会拿不到人名 —— 所以要连续向左并，最多并 3 段，
+        # 直到能从拼起来的文字里解析出人名为止（并的间隔不超过 ICON_GAP_PT）。
+        left_spans = sorted([span for span in spans if _v_overlap(span) and span["bbox"][2] <= x0 + 1.0],
+                            key=lambda span: span["bbox"][2], reverse=True)
+        collected, names, right_edge = [], [], x0
+        for span in left_spans[:4]:
+            if right_edge - span["bbox"][2] > ICON_GAP_PT:
+                break
+            collected.insert(0, span["text"])
+            right_edge = span["bbox"][0]
+            names = split_name_list("".join(collected))
+            if names:
+                break
+        if not names:
+            continue
+
+        matched = match_author(names[-1], authors)
+        if not matched or matched in seen:
+            continue
+        seen.add(matched)
+        marked.append((matched, f"{kind}图标（x≈{x0:.0f}）"))
+    return marked
+
+
 def _email_pool(doc, blocks):
     """
     收集「像是通讯邮箱」的地址：通讯段落里的、第一页 mailto 链接里的、
     带 e-mail 标签的。ACM 那种逐作者列出的邮箱**不算**（它没有标注通讯作者）。
+
+    返回 (邮箱, 来源说明, 页码, x 坐标)：x 用于与「作者行图标」按左右顺序配对。
     """
     pool = []
     if doc is not None and doc.page_count:
         for link in doc[0].get_links():
             uri = (link.get("uri") or "")
             if uri.lower().startswith("mailto:"):
-                pool.append((uri[7:].strip(), "第 1 页邮件链接", 0))
+                rect = link.get("from") or (0, 0, 0, 0)
+                pool.append((uri[7:].strip(), "第 1 页邮件链接", 0, rect[0]))
     for block in blocks:
         if block.page > 2:
             continue
@@ -901,34 +1053,45 @@ def _email_pool(doc, blocks):
         if not has_label:
             continue
         for email in _EMAIL_RE.findall(text):
-            pool.append((email, f"第 {block.page} 页通讯栏目", block.page))
+            pool.append((email, f"第 {block.page} 页通讯栏目", block.page, block.x0))
     unique, seen = [], set()
-    for email, source, page in pool:
+    for email, source, page, x in pool:
         key = email.lower()
         if key in seen:
             continue
         seen.add(key)
-        unique.append((email, source, page))
+        unique.append((email, source, page, x))
+    # 注意：**不要**在这里按 x 排序。邮箱的顺序决定了原有逻辑「取第一个通讯邮箱」的结果，
+    # 排序会顺带改变已发布版本的行为（实测把 单栏.pdf 的通讯邮箱从 ACM 的
+    # permissions@acm.org 换成了作者邮箱）。需要按左右顺序配对的地方（图标标记）
+    # 自己在本地排序即可。见回归比对：这条纪律保证新功能不动原有输出。
     return unique
 
 
-def extract_corresponding(blocks, authors, doc=None):
+def extract_corresponding(blocks, authors, doc=None, positioned=None):
     """
     提取通讯作者与通讯邮箱。返回 (Field 作者, Field 邮箱)。
 
-    只在有证据时才给结果：
+    只在有证据时才给结果，顺序如下：
       ① 显式通讯段落（*CORRESPONDENCE / Corresponding Author: / …addressed to…）；
+      ①b **图标标记**（很多期刊在通讯作者名后画一个小信封图标，如 npj Digital Medicine）——
+         图标是矢量图形或小图片，文本规则看不到，必须查 get_drawings / get_image_info；
       ② 由通讯邮箱反查作者（antti.oulasvirta@aalto.fi → Antti Oulasvirta）。
     都没有就如实报「未找到」——**绝不猜**（用户要求准确性优先）。
     """
     emails = _email_pool(doc, blocks)
-    email_field = Field()
-    if emails:
-        email = emails[0][0]
-        email_field = Field(value=email, source=emails[0][1],
-                            note="" if len(emails) == 1 else
-                                 f"PDF 里有 {len(emails)} 个通讯类邮箱，这里取第一个："
-                                 + "、".join(item[0] for item in emails[1:4]))
+
+    def _emails_field(items):
+        """把邮箱拼成字段；多个邮箱用顿号分隔（共同通讯作者可能不止一个）"""
+        if not items:
+            return Field()
+        text = "、".join(item[0] for item in items)
+        source = items[0][1] if len(items) == 1 else f"{items[0][1]} 等 {len(items)} 处"
+        return Field(value=text, source=source,
+                     note="" if len(items) == 1 else
+                          f"PDF 里有 {len(items)} 个通讯类邮箱：" + "、".join(i[0] for i in items[:4]))
+
+    email_field = _emails_field(emails[:1])
 
     # ---- ① 显式通讯段落 ----
     for index, block in enumerate(blocks):
@@ -962,8 +1125,47 @@ def extract_corresponding(blocks, authors, doc=None):
                           note=_norm(remainder)[:80] if remainder else ""),
                     email_field)
 
+    # ---- ①b 图标标记（信封图标 = 通讯作者）----
+    marked = find_icon_marked_authors(doc, positioned, authors)
+    if marked:
+        # 这里才需要「按左右顺序」：图标的左右顺序与页脚邮箱的左右顺序通常一致。
+        # 只在这一支里排序，不影响上面那条「取第一个通讯邮箱」的既有行为。
+        ordered_emails = sorted(emails, key=lambda item: item[3])
+        pairs = []
+        used_emails = set()
+        for index, (name, how) in enumerate(marked):
+            email = ""
+            # 先按「邮箱本地部分含这位作者的姓名」找（最可靠）
+            for candidate_email, _source, _page, _x in ordered_emails:
+                if candidate_email.lower() in used_emails:      # 已被别人配走，别重复用
+                    continue
+                if match_author(candidate_email.split("@")[0], [name]):
+                    email = candidate_email
+                    break
+            # 找不到就按页脚里邮箱的**左右顺序**依次配对（与图标的左右顺序一致）
+            if not email and index < len(ordered_emails):
+                candidate_email = ordered_emails[index][0]
+                if candidate_email.lower() not in used_emails:
+                    email = candidate_email       # 同一个邮箱不会配给两位作者；配不到就留空
+            if email:
+                used_emails.add(email.lower())
+            pairs.append((name, email, how))
+
+        names_text = "、".join(name for name, _e, _h in pairs)
+        emails_text = "、".join(email for _n, email, _h in pairs if email)
+        detail = "；".join(f"{name} ← {how}" + (f"，邮箱 {email}" if email else "，未配到邮箱")
+                          for name, email, how in pairs)
+        rest = [item[0] for item in emails if item[0].lower() not in used_emails]
+        note = ("识别依据（信封图标紧跟在被标记的作者名之后）：" + detail
+                + ("。另外 PDF 里还有邮箱：" + "、".join(rest) if rest else "")
+                + "。请核对后按需修改")
+        return (Field(value=names_text, source="第 1 页作者行图标标记（信封图标）", note=note),
+                Field(value=emails_text,
+                      source="第 1 页页脚邮箱（按图标左右顺序配对）",
+                      note=detail if emails_text else "找到了图标标记但没找到对应邮箱"))
+
     # ---- ② 由通讯邮箱反查作者 ----
-    for email, source, _page in emails:
+    for email, source, _page, _x in emails:
         local = email.split("@")[0]
         matched = match_author(local, authors)
         if matched:
@@ -1191,7 +1393,10 @@ def extract_metadata(pdf_bytes: bytes, blocks=None) -> Metadata:
         names, author_source, author_note, positioned = extract_authors(blocks, title.value)
         affiliations, affiliation_source, affiliation_note = extract_affiliations(
             blocks, title.value, doc)
-        corresponding, corresponding_email = extract_corresponding(blocks, names, doc)
+        # 把作者位置（positioned）一并传进去：图标标记识别要用它确定「作者行带子」，
+        # 不传的话图标分支永远不会触发（该分支只认落在作者行附近的小图形）。
+        corresponding, corresponding_email = extract_corresponding(
+            blocks, names, doc, positioned=positioned)
         author_emails = extract_author_emails(
             author_zone(blocks, title.value)[0], positioned)
         supplementary, supplementary_items, supplementary_note = extract_supplementary(doc)
