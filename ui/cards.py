@@ -7,7 +7,7 @@ ui.cards —— 阅读卡片的标签、翻译与渲染（阶段 5 从 app.py �
 
 import streamlit as st
 
-from utils import store
+from utils import store, translate_plan
 from utils.pdf_parser import ROLE_NAMES, count_words, escape_markdown
 from utils.translator import TranslationError, translate, translate_many
 
@@ -165,6 +165,49 @@ def translate_cached_batch(texts, backend: str, target: str):
               f"{sum(len(texts[i]) for i in pending)}字符", flush=True)
 
     return results, None
+
+
+def translate_all(cards, backend: str, target: str, chunk_segments: int = 20,
+                  chunk_chars: int = 20000, on_progress=None) -> dict:
+    """
+    把整篇文献**还没译文的段落**一次性翻完（阶段 6.4）。
+
+    为什么要有这个动作：平时翻译是「读到哪翻到哪」，于是没看过的卡片从来没被翻译过、
+    也就没落盘；等你想断网重读时，那些卡片只能退回英文。这里把缺口补齐。
+
+    已译过的段落会自动命中缓存、不会重复请求，所以多点几次是安全的（第 2 次基本零请求）。
+    分块的原因：DeepL 对单次请求的文本条数与体积都有上限（这里按 20 段 / 2 万字符一批，
+    远低于上限，同时进度条也能动起来）。
+
+    返回 dict：texts 待译段数 / done 已完成 / requests 批次数 / failed 失败段数 / error 错误消息。
+    """
+    plan = translate_plan.pending_texts(cards, backend, target) if backend else []
+    result = {"texts": len(plan), "done": 0, "requests": 0, "failed": 0, "error": None}
+    if not backend or not plan:
+        return result
+
+    # 按「段数」与「总字符」双重上限切批，避免一次请求过大
+    batches, current, current_chars = [], [], 0
+    for text in plan:
+        if current and (len(current) >= chunk_segments or current_chars + len(text) > chunk_chars):
+            batches.append(current)
+            current, current_chars = [], 0
+        current.append(text)
+        current_chars += len(text)
+    if current:
+        batches.append(current)
+
+    for batch in batches:
+        _, error = translate_cached_batch(batch, backend, target)
+        if error:
+            result["failed"] += len(batch)
+            result["error"] = error
+            break
+        result["done"] += len(batch)
+        result["requests"] += 1
+        if on_progress:
+            on_progress(result["done"], len(plan))
+    return result
 
 
 def render_card_translated(item, pdf_bytes: bytes, backend: str, target: str):

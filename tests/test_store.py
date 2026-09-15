@@ -160,6 +160,29 @@ check("空译文（空字符串）是合法值，读取时不会被当成没命�
       store.get_translation("deepl", "zh", "   ") == "  ")
 
 print()
+print("④-B 落盘时与磁盘合并：两个窗口/进程不会互相覆盖译文（阶段 6.4 加固）")
+print("-" * 78)
+fresh("merge")
+store.put_translation("deepl", "zh", text_one, "小鼠被分成两组。")
+store.flush_translations()
+# 模拟「另一个进程」：它自己往同一个文件里写了一条译文（我方内存里没有这条）
+other = store._read_json(store.translations_path())
+other["entries"]["deepl|zh|" + store.text_hash("另一进程翻译的段落")] = "另一进程的译文"
+store._write_json(store.translations_path(), other)
+
+store.put_translation("deepl", "zh", text_two, "结果用混合效应模型分析。")
+store.flush_translations()
+merged = store.load_translations()
+check("我方新写的译文在", merged.get(store.translation_key("deepl", "zh", text_two)) is not None)
+check("磁盘上那条「别的进程写的」没有被覆盖掉（合并而不是整体重写）",
+      merged.get("deepl|zh|" + store.text_hash("另一进程翻译的段落")) == "另一进程的译文")
+
+store.reload_translations()
+check("重启进程后两条都还在（都真的落盘了）",
+      store.get_translation("deepl", "zh", "另一进程翻译的段落") == "另一进程的译文"
+      and store.get_translation("deepl", "zh", text_two) is not None)
+
+print()
 print("⑤ 原子写与容错：坏文件绝不能把界面带崩")
 print("-" * 78)
 fresh("robust")

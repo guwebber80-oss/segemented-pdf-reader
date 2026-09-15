@@ -147,9 +147,13 @@ def runtime_theme() -> str:
         return ""
 
 
-def current_theme() -> str:
-    """当前生效的主题：配置文件优先（重启后生效的那个），其次当前进程的设置"""
-    return read_config_theme() or runtime_theme()
+def current_theme(path: str = "") -> str:
+    """
+    当前生效的主题：配置文件优先（重启后生效的那个），其次当前进程的设置。
+
+    path 只给测试传（测试用临时配置文件，避免受本机 `.streamlit/config.toml` 影响）。
+    """
+    return read_config_theme(path) or runtime_theme()
 
 
 def _set_runtime_theme(base: str) -> bool:

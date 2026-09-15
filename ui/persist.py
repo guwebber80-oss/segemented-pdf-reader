@@ -25,7 +25,9 @@ import json
 
 import streamlit as st
 
-from utils import store
+from utils import store, translate_plan
+
+from .cards import translate_all
 
 # 设置项清单：(控件 key, 记录里的字段名, 默认值, 取值范围或可选项)
 # 取值范围写成 (最小, 最大) 的二元组；可选项写成候选值元组；None = 不做校验。
@@ -163,6 +165,65 @@ def build_record(key: str, file_name: str, file_size: int, card_index: int,
 def save_record(**kwargs) -> bool:
     """组装并落盘（对调用方来说就是一个动作）"""
     return store.save_paper(build_record(**kwargs))
+
+
+# ============================================================
+# 5. 左栏的「译文覆盖」面板（阶段 6.4）
+# ============================================================
+def render_translation_coverage(cards, backend, target) -> None:
+    """
+    显示「多少张卡已经能离线看中文」，并给一个「翻译整篇」的入口。
+
+    为什么要有它（用户 2026-09-16 实测报的现象）：平时翻译是**读到哪翻到哪**，
+    没显示过的卡片既没有译文、也没有落盘；于是关掉进程重新打开、重新上传同一篇时，
+    那些卡片仍要联网翻译一次，断网就只能看英文原文。缓存本身没坏——
+    看过的那几张卡 100% 命中——缺的是「把整篇补齐」这一步。
+    这个面板把缺口显式化，并给一次补齐的按钮（已译段落不会重复请求，所以安全）。
+    """
+    st.markdown("**🌐 译文覆盖**")
+    if not backend:
+        st.caption("没有可用的翻译后端，无法统计译文覆盖。")
+        return
+    if not cards:
+        st.caption("还没有阅读卡片。")
+        return
+
+    info = translate_plan.coverage(cards, backend, target)
+    st.caption(f"已能离线读中文：**{info['covered_cards']} / {info['cards']}** 张卡 · "
+               f"段落 {info['covered_texts']} / {info['texts']} 段")
+
+    if info["pending"]:
+        st.caption(f"还有 **{len(info['pending'])}** 段没有译文——"
+                   "没翻到的卡片不会自动翻译，所以断网时它们只能看英文原文。")
+        if st.button(f"🌐 翻译整篇（补齐 {len(info['pending'])} 段）", key="translate_all_btn",
+                     help="把全文还没译文的段落一次翻完并存进本地缓存。"
+                          "已经译过的段落会命中缓存、不会重复请求，所以多点几次也安全。"
+                          "注意：会消耗翻译额度。"):
+            bar = st.progress(0.0, text="正在翻译整篇…")
+
+            def on_progress(done, total, _bar=bar):
+                _bar.progress(min(done / total, 1.0) if total else 1.0,
+                              text=f"正在翻译整篇… {done} / {total} 段")
+
+            result = translate_all(cards, backend, target, on_progress=on_progress)
+            store.flush_translations()          # 立刻落盘：别等关进程时才存
+            bar.empty()
+            if result["error"]:
+                st.session_state["translate_all_message"] = ("error",
+                    f"翻译中断：{result['error']}（已完成 {result['done']} 段并已存入本地；"
+                    "解决网络或额度问题后再点一次即可接着翻译，已译的不会重复请求）")
+            else:
+                st.session_state["translate_all_message"] = ("success",
+                    f"整篇翻译完成：新增 {result['done']} 段（{result['requests']} 次请求）。"
+                    "现在整篇都能离线看中文了。")
+            st.rerun()
+    else:
+        st.success("整篇都有译文了：断网也能看中文。")
+
+    message = st.session_state.pop("translate_all_message", None)
+    if message:
+        kind, text = message
+        (st.error if kind == "error" else st.success)(text)
 
 
 # ============================================================

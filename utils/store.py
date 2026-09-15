@@ -373,6 +373,11 @@ def flush_translations(force: bool = False) -> bool:
     """
     把内存里的译文表落盘（没改动就不写，避免每次翻页都重写几十 KB）。
 
+    **写之前先跟磁盘上的现状合并**（内存版本优先）：译文是按文本哈希存的、
+    只增不减，所以合并是安全的；好处是「开着两个窗口/两个进程读同一篇」时，
+    后写的一方不会把对方刚存下的译文覆盖掉——实测踩过这个坑：一个进程写盘时
+    只把自己内存里的那几张卡写进去，之前进程存下的译文就没了。
+
     整体重写 + 原子替换：文件不大（一篇论文全译约几十 KB），够快也够安全。
     """
     global _translations_dirty
@@ -380,6 +385,14 @@ def flush_translations(force: bool = False) -> bool:
         return True
     if not _translations_dirty and not force:
         return True
+
+    on_disk = _read_json(translations_path()) or {}
+    entries = on_disk.get("entries")
+    if isinstance(entries, dict) and entries:
+        # 磁盘上多出来的条目也吸收进内存，界面上查得到、不会白存
+        for key, value in entries.items():
+            _translations.setdefault(key, value)
+
     payload = {"version": CACHE_VERSION, "saved_at": now_text(), "entries": _translations}
     if not _write_json(translations_path(), payload):
         return False

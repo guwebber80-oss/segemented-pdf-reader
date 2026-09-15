@@ -127,10 +127,15 @@ check("把主题清空后不留 base 键",
 print()
 print("③ 当前主题与非法输入")
 print("-" * 78)
-# 注意：这一段必须在调用 apply_theme 之前跑——apply_theme 会改当前进程的运行时配置
-check("没有配置时 current_theme() 返回空字符串（= 未指定）",
-      theme.current_theme() == "" or theme.current_theme() in (theme.THEME_LIGHT, theme.THEME_DARK),
+# 注意：这一段必须在调用 apply_theme 之前跑——apply_theme 会改当前进程的运行时配置。
+# 也注意不要假设「本机没有 .streamlit/config.toml」：界面上点过明/暗切换之后它就会存在，
+# 所以这里只断言「取值合法」，不断言具体值（具体值的断言一律走临时配置文件）。
+check("current_theme() 只会给出 light / dark / 空字符串（不会给出别的值）",
+      theme.current_theme() in ("", theme.THEME_LIGHT, theme.THEME_DARK),
       repr(theme.current_theme()))
+check("临时配置文件为空时，current_theme(临时路径) 落到运行时值（合法取值）",
+      theme.current_theme(CONFIG) in ("", theme.THEME_LIGHT, theme.THEME_DARK),
+      repr(theme.current_theme(CONFIG)))
 
 check("标签表覆盖两种主题",
       set(theme.THEME_LABELS) == {theme.THEME_LIGHT, theme.THEME_DARK}
@@ -143,8 +148,8 @@ check("被拒绝时不会顺手写文件", theme.read_config_theme(CONFIG) == ""
 ok, message = theme.apply_theme(theme.THEME_DARK, CONFIG)
 check("合法主题切换成功，并提示要刷新页面",
       ok is True and "F5" in message and 'base = "dark"' in read(), repr(message))
-check("切换后 current_theme 认得新主题",
-      theme.current_theme() == theme.THEME_DARK, repr(theme.current_theme()))
+check("切换后 current_theme（临时路径）认得新主题",
+      theme.current_theme(CONFIG) == theme.THEME_DARK, repr(theme.current_theme(CONFIG)))
 check("配置文件路径指向项目的 .streamlit/config.toml",
       theme.config_path().replace("\\", "/").endswith("segemented-pdf-reader/.streamlit/config.toml")
       and os.path.dirname(theme.config_path()) == os.path.join(theme.PROJECT_ROOT, ".streamlit"),

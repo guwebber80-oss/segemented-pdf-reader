@@ -79,6 +79,7 @@ from ui.media import (
 from ui.persist import (
     build_record,
     render_cache_panel,
+    render_translation_coverage,
     restore_edits,
     restore_grobid,
     seed_settings,
@@ -250,6 +251,9 @@ with col_left:
     status_slot = st.container()          # 解析完成后往这里填状态
     meta_status_slot = st.empty()
 
+    # 译文覆盖与「翻译整篇」也要等卡片出来才能算，所以同样先占位（阶段 6.4）
+    coverage_slot = st.container()
+
     # 本地缓存面板也先占位，等这次的成果存盘之后再填内容（数字才是最新的）
     cache_slot = st.expander("💾 本地缓存", expanded=False)
 
@@ -382,6 +386,11 @@ with col_left:
         if st.session_state.get("image_error"):
             st.warning("图片提取失败：" + st.session_state["image_error"])
 
+    # 译文覆盖 + 「翻译整篇」（阶段 6.4）：太长的卡不会自动翻，这里让用户一次补齐，
+    # 补齐之后断网重读也是全中文（译文落在 .cache/translations.json 里）
+    with coverage_slot:
+        render_translation_coverage(cards, backend, target)
+
     st.divider()
     st.markdown("**章节导航**")
     if cards:
@@ -471,14 +480,20 @@ with col_mid:
                             zh, batch_error = translate_cached(card.text, backend, target)
                             if batch_error:
                                 st.error(f"翻译失败：{batch_error}")
-                                st.caption("下面仍然显示英文原文；问题解决后重新切到中文即可。")
+                                st.caption(
+                                    "下面仍然显示英文原文。若这张卡片**本地还没有译文**"
+                                    "（左栏「🌐 译文覆盖」能看出来），就需要联网翻译一次；"
+                                    "也可以在有网时先点「🌐 翻译整篇」把整篇补齐，之后断网也能看中文。")
                                 render_card_content(card, pdf_bytes)
                             else:
                                 translated_cards += 1
                                 st.markdown(escape_markdown(zh))
                         else:
                             st.error(f"翻译失败：{error}")
-                            st.caption("下面仍然显示英文原文；问题解决后重新切到中文即可。")
+                            st.caption(
+                                "下面仍然显示英文原文。若这张卡片**本地还没有译文**"
+                                "（左栏「🌐 译文覆盖」能看出来），就需要联网翻译一次；"
+                                "也可以在有网时先点「🌐 翻译整篇」把整篇补齐，之后断网也能看中文。")
                             render_card_content(card, pdf_bytes)
                 else:
                     render_card_content(card, pdf_bytes)
