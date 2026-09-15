@@ -67,6 +67,15 @@ from ui.cards import (
     translate_cached,
 )
 from ui.diagnostics import render_background_panel, render_diagnostics
+from ui.layout import (
+    HEIGHT_KEY,
+    HEIGHT_PRESETS,
+    KEY_CARD,
+    SCROLL_KEY,
+    box_kwargs,
+    card_box_height,
+    ensure_state as ensure_layout_state,
+)
 from ui.metadata_panel import render_grobid_panel, render_metadata_panel
 from ui.media import (
     is_formula_item,
@@ -109,6 +118,9 @@ if "translate_stats" not in st.session_state:
     st.session_state["translate_stats"] = {"requests": 0, "hits": 0, "chars": 0, "errors": 0}
 if "card_index" not in st.session_state:
     st.session_state["card_index"] = 0
+
+# 阅读布局的默认值（卡片固定高度开关 + 高度档位）：控件创建之前补上缺失的键
+ensure_layout_state()
 
 # ============================================================
 # 第 2 部分：三栏骨架（左：功能控件 / 中：阅读卡片 / 右：背景信息）
@@ -199,6 +211,25 @@ with col_left:
                  "方便你核对过滤有没有误杀真正文。该模式保持原文（不做翻译）。",
         )
     table_mode = "text" if table_mode_label == "保留文字" else "image"
+
+    # 阅读布局（阶段 6.6 小步 1）：只做「卡片区固定高度 + 卡内滚动」这一件事。
+    # 刻意保持小：不碰左右两栏、不注入任何 CSS，全部用原生 API（见 ui/layout.py 的说明）。
+    with st.expander("🖥️ 阅读布局", expanded=False):
+        scroll_on = st.toggle(
+            "卡片固定高度（卡内滚动）", key=SCROLL_KEY,
+            help="开启后卡片正文与插图落在固定高度的区域里：内容长了在**卡片内部**滚动，"
+                 "翻页按钮与进度条不跟着上下跳。关掉即完全回到改动前的样子。",
+        )
+        height_mode = st.radio(
+            "卡片高度", list(HEIGHT_PRESETS), key=HEIGHT_KEY, horizontal=True,
+            help=f"卡片区的可视高度：矮 {HEIGHT_PRESETS['矮']} / 中 {HEIGHT_PRESETS['中']} / "
+                 f"高 {HEIGHT_PRESETS['高']} 像素。这是**像素**不是自适应——"
+                 "Streamlit 拿不到窗口高度，所以给三档让你按显示器挑。",
+        )
+        st.caption("只想让卡片区固定、左右两栏照旧滚动；「沉浸模式」还没做（等你验完这一小步）。")
+
+    # 卡片滚动容器的参数（关掉开关就是空 dict = 不传 height，完全回退）
+    card_kwargs = box_kwargs(card_box_height(scroll_on, height_mode))
 
     with st.expander("🌐 翻译设置", expanded=False):
         config = load_config()
@@ -456,55 +487,60 @@ with col_mid:
         with body_col:
             st.caption(card_label(card))
 
-            # 内容居中：两侧留白 + 中间一列（近似 demo 里 760px 的文字列），
-            # 文字内部仍是左对齐——英文正文居中排版会串行。
-            pad_left, content_col, pad_right = st.columns([1, 6, 1])
-            with content_col:
-                if lang == LANG_ZH and backend is None:
-                    st.warning("没有可用的翻译后端，先显示英文原文。")
-                    render_card_content(card, pdf_bytes)
-                elif lang == LANG_ZH:
-                    if is_table_item(card) and not card.segments:
-                        render_table(paragraph_formula_payload(card), pdf_bytes)
-                        translated_cards += 1
-                    elif is_formula_item(card) and not card.segments:
-                        render_formula(paragraph_formula_payload(card), pdf_bytes)
-                        st.caption("公式区域：保留原文截图，不参与翻译。")
-                        translated_cards += 1
-                    else:
-                        status, error = render_card_translated(card, pdf_bytes, backend, target)
-                        if status == "ok":
-                            translated_cards += 1
-                            st.caption("中文视图：正文与标题已翻译；公式与表格保持原文截图。")
-                        elif status == "no_segments":
-                            zh, batch_error = translate_cached(card.text, backend, target)
-                            if batch_error:
-                                st.error(f"翻译失败：{batch_error}")
-                                st.caption(
-                                    "下面仍然显示英文原文。若这张卡片**本地还没有译文**"
-                                    "（左栏「🌐 译文覆盖」能看出来），就需要联网翻译一次；"
-                                    "也可以在有网时先点「🌐 翻译整篇」把整篇补齐，之后断网也能看中文。")
-                                render_card_content(card, pdf_bytes)
-                            else:
-                                translated_cards += 1
-                                st.markdown(escape_markdown(zh))
-                        else:
-                            st.error(f"翻译失败：{error}")
-                            st.caption(
-                                "下面仍然显示英文原文。若这张卡片**本地还没有译文**"
-                                "（左栏「🌐 译文覆盖」能看出来），就需要联网翻译一次；"
-                                "也可以在有网时先点「🌐 翻译整篇」把整篇补齐，之后断网也能看中文。")
+            # ---- 卡片区固定高度 + 卡内滚动（阶段 6.6 小步 1）----
+            # 用**原生** st.container(height=N)：内容超出高度时在**卡片内部**滚动，
+            # 于是 ‹ › 翻页按钮与进度条不会随卡片长短上下跳。
+            # 关掉开关就不传 height（完全回到改动前的行为）；左右两栏不受任何影响。
+            with st.container(key=KEY_CARD, **card_kwargs):
+                    # 内容居中：两侧留白 + 中间一列（近似 demo 里 760px 的文字列），
+                    # 文字内部仍是左对齐——英文正文居中排版会串行。
+                    pad_left, content_col, pad_right = st.columns([1, 6, 1])
+                    with content_col:
+                        if lang == LANG_ZH and backend is None:
+                            st.warning("没有可用的翻译后端，先显示英文原文。")
                             render_card_content(card, pdf_bytes)
-                else:
-                    render_card_content(card, pdf_bytes)
+                        elif lang == LANG_ZH:
+                            if is_table_item(card) and not card.segments:
+                                render_table(paragraph_formula_payload(card), pdf_bytes)
+                                translated_cards += 1
+                            elif is_formula_item(card) and not card.segments:
+                                render_formula(paragraph_formula_payload(card), pdf_bytes)
+                                st.caption("公式区域：保留原文截图，不参与翻译。")
+                                translated_cards += 1
+                            else:
+                                status, error = render_card_translated(card, pdf_bytes, backend, target)
+                                if status == "ok":
+                                    translated_cards += 1
+                                    st.caption("中文视图：正文与标题已翻译；公式与表格保持原文截图。")
+                                elif status == "no_segments":
+                                    zh, batch_error = translate_cached(card.text, backend, target)
+                                    if batch_error:
+                                        st.error(f"翻译失败：{batch_error}")
+                                        st.caption(
+                                            "下面仍然显示英文原文。若这张卡片**本地还没有译文**"
+                                            "（左栏「🌐 译文覆盖」能看出来），就需要联网翻译一次；"
+                                            "也可以在有网时先点「🌐 翻译整篇」把整篇补齐，之后断网也能看中文。")
+                                        render_card_content(card, pdf_bytes)
+                                    else:
+                                        translated_cards += 1
+                                        st.markdown(escape_markdown(zh))
+                                else:
+                                    st.error(f"翻译失败：{error}")
+                                    st.caption(
+                                        "下面仍然显示英文原文。若这张卡片**本地还没有译文**"
+                                        "（左栏「🌐 译文覆盖」能看出来），就需要联网翻译一次；"
+                                        "也可以在有网时先点「🌐 翻译整篇」把整篇补齐，之后断网也能看中文。")
+                                    render_card_content(card, pdf_bytes)
+                        else:
+                            render_card_content(card, pdf_bytes)
 
-            # ---- 插图跟在「它对应的那张卡片」后面（比文字列更宽）----
-            card_images = images_by_card.get(card.order, [])
-            if card_images:
-                fig_pad_left, figures_col, fig_pad_right = st.columns([0.4, 8, 0.4])
-                with figures_col:
-                    for img in card_images:
-                        render_figure(img, pdf_bytes, key_prefix=f"card{card.order}")
+                    # ---- 插图跟在「它对应的那张卡片」后面（比文字列更宽）----
+                    card_images = images_by_card.get(card.order, [])
+                    if card_images:
+                        fig_pad_left, figures_col, fig_pad_right = st.columns([0.4, 8, 0.4])
+                        with figures_col:
+                            for img in card_images:
+                                render_figure(img, pdf_bytes, key_prefix=f"card{card.order}")
 
         # ---- 进度 ----
         st.progress((index + 1) / total_cards if total_cards else 0.0)

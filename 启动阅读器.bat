@@ -53,7 +53,7 @@ rem 所以补一个点，cd /d "%~dp0." 才是安全写法。
 cd /d "%~dp0."
 
 echo [..]   检查依赖与模块...
-"%PY%" -c "import utils.pdf_parser, utils.table_finder, utils.metadata, utils.metadata_compare, utils.grobid_client, utils.image_extractor, utils.translator, utils.store, ui.persist, ui.theme" 1>nul 2>nul
+"%PY%" -c "import utils.pdf_parser, utils.table_finder, utils.metadata, utils.metadata_compare, utils.grobid_client, utils.image_extractor, utils.translator, utils.store, ui.persist, ui.theme, ui.layout" 1>nul 2>nul
 if errorlevel 1 (
     echo [警告] 依赖或模块导入失败，阅读器启动不了。常见原因有两种：
     echo         一：新版本新增了依赖，执行下面这条命令即可：

@@ -82,7 +82,7 @@ expected = {
     "utils": ["pdf_parser", "formula_finder", "table_finder", "image_extractor",
               "metadata", "grobid_client", "metadata_compare", "translator", "store",
               "translate_plan"],
-    "ui": ["media", "cards", "persist", "theme"],
+    "ui": ["media", "cards", "persist", "theme", "layout"],
 }
 for package, names in expected.items():
     folder = os.path.join(PROJECT, package)
@@ -187,6 +187,37 @@ for folder in (UTILS, UI, os.path.join(PROJECT, "tests")):
         except SyntaxError as exc:
             broken.append(f"{name}: {exc}")
 check("utils / ui / tests 下全部 .py 都能解析", broken == [], repr(broken[:2]))
+
+print()
+print("⑧ 模块级顺序检查：with / for 的表达式不许在它被赋值之前引用")
+# 为什么单独查这一条：上面的未定义名检查是「集合比对」，只要这个名字在文件里**任何地方**
+# 被赋值过就算通过，看不见**顺序**。实测踩到过：批量替换把 with left_box: 改到了创建
+# left_box 之前，运行期 NameError，而当时 10 条守卫全绿。
+# with/for 的表达式是在进入语句体之前求值的，所以只需拿「此前语句绑定过的名字」比对。
+ordered = []
+app_path = os.path.join(PROJECT, "app.py")
+app_tree = ast.parse(open(app_path, encoding="utf-8").read(), app_path)
+seen = set()
+for statement in app_tree.body:
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                              ast.Import, ast.ImportFrom)):
+        bound_names(statement, seen)          # 定义/导入本身就完成了绑定
+        continue
+    early = []
+    if isinstance(statement, ast.With):
+        for item in statement.items:
+            early += [child.id for child in ast.walk(item.context_expr)
+                      if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)]
+    elif isinstance(statement, (ast.For, ast.AsyncFor)):
+        early += [child.id for child in ast.walk(statement.iter)
+                  if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)]
+    missing = sorted(set(early) - seen - BUILTINS)
+    if missing:
+        ordered.append(f"第 {statement.lineno} 行：{missing}")
+    own = set()
+    bound_names(statement, own)
+    seen |= own
+check("app.py 里 with / for 用到的名字都在之前绑定过", ordered == [], repr(ordered[:2]))
 
 print()
 print("=" * 78)
