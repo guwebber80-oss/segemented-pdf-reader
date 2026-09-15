@@ -208,6 +208,15 @@ figcaption .zoom{color:var(--accent);margin-left:6px}
 .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#2f6df6,#61a0ff);
   transition:width .2s ease}
 
+/* ---------- GROBID 对照行 / 诊断列表 ---------- */
+.grow-row{border:1px solid var(--line);border-radius:10px;padding:7px 9px;margin-top:7px;font-size:12px}
+.grow-head{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.grow-head .verdict{color:var(--ink-3);font-size:11.5px}
+.grow-line{display:flex;gap:7px;margin-top:3px;color:var(--ink-2)}
+.grow-line span{flex:0 0 52px;color:var(--ink-3);font-size:11px}
+.grow-row .hbtn{margin-top:6px;font-size:11.5px;padding:4px 8px}
+ul.diag{margin:5px 0 0;padding-left:16px;line-height:1.6}
+ul.diag li{margin-bottom:2px}
 /* ---------- 暗色模式（自建前端的好处：一个 class 就够） ---------- */
 body.dark{
   --bg:#12161d; --panel:#1a202a; --ink:#e8edf5; --ink-2:#a9b6c8; --ink-3:#7d8a9c;

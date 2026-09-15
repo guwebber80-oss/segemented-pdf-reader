@@ -127,6 +127,10 @@ class Handler(BaseHTTPRequestHandler):
                                    parse_qs(urlparse(self.path).query).get("size", ["thumb"])[0])
         if path == "/api/pending":
             return self._api_pending()
+        if path == "/api/grobid/status":
+            return self._send_json({"ok": True, **STATE.grobid_status()})
+        if path == "/api/diagnostics":
+            return self._send_json({"ok": True, "diagnostics": STATE.diagnostics()})
         if path == "/api/status":
             return self._api_status()
         return self._send_error_json("没有这个地址：" + path, code=404)
@@ -148,6 +152,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_cache_clear()
             if path == "/api/reparse":
                 return self._api_reparse()
+            if path == "/api/grobid":
+                return self._api_grobid()
+            if path == "/api/grobid/apply":
+                return self._api_grobid_apply()
         except ValueError as exc:                       # 预期内的输入问题
             return self._send_error_json(str(exc), code=400)
         except Exception as exc:                        # 兜底：任何异常都别让服务崩掉
@@ -192,6 +200,21 @@ class Handler(BaseHTTPRequestHandler):
         print(f"  重新解析：{STATE.file_name} · 卡片 {len(data.get('cards') or [])} 张 · "
               f"用时 {data['elapsed_total']}s")
         self._send_json(data)
+
+    def _api_grobid(self):
+        """运行 GROBID 交叉校验（返回逐字段对照；服务不在时如实说明）"""
+        result = STATE.run_grobid()
+        self._send_json(result)
+
+    def _api_grobid_apply(self):
+        """采信 GROBID 的某个字段（列表字段只补空不覆盖）"""
+        body = self._read_json()
+        store_key = body.get("store_key") or ""
+        value = body.get("value") or ""
+        is_list = bool(body.get("is_list"))
+        if not store_key:
+            return self._send_error_json("缺少 store_key", code=400)
+        self._send_json(STATE.apply_grobid(store_key, value, is_list))
 
     def _api_pending(self):
         """整篇翻译用的待译清单（前端分批调用 /api/translate，自带进度）"""

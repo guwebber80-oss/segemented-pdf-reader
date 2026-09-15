@@ -12,9 +12,10 @@ webapp.state —— 服务端"当前这篇文献"的会话状态（纯 Python，
   · 读过的文献与译文仍然落 `.cache/`（复用 utils.store），所以关掉网页再打开能接上。
 """
 
+import os
 import threading
 
-from utils import image_extractor, metadata as metadata_module, pdf_parser, store
+from utils import grobid_client, image_extractor, metadata as metadata_module, pdf_parser, store
 from utils import translate_plan
 
 from . import payload as payload_module
@@ -233,6 +234,108 @@ class PaperState:
             pending = translate_plan.pending_texts(self.parse_result["cards"], backend, target)
             return pending[:limit]
 
+    # ---------------- GROBID 交叉校验（第二意见） ----------------
+    def grobid_status(self) -> dict:
+        """探测本地 GROBID 服务（不抛异常，返回给前端如实显示）"""
+        base = os.environ.get("GROBID_URL", grobid_client.DEFAULT_BASE_URL)
+        alive, message = grobid_client.is_alive(base)
+        return {"alive": alive, "message": message, "url": base}
+
+    def run_grobid(self) -> dict:
+        """
+        调 GROBID 抽头部信息，并与本地规则逐字段对照。
+
+        结果存进论文记录（`grobid` 字段，与 Streamlit 版同名字段）→ 下次打开不必重跑（省 5~10 秒）。
+        """
+        from utils import metadata_compare
+
+        with self._lock:
+            if self.pdf_bytes is None:
+                return {"ok": False, "error": "还没有打开文献", "rows": [], "alive": False}
+            status = self.grobid_status()
+            if not status["alive"]:
+                return {"ok": False, "error": status["message"], "rows": [],
+                        "alive": False, "url": status["url"]}
+            try:
+                result = grobid_client.header_from_pdf(
+                    self.pdf_bytes, base_url=status["url"], filename=self.file_name)
+            except grobid_client.GrobidError as exc:
+                return {"ok": False, "error": str(exc), "rows": [], "alive": True}
+            except Exception as exc:                       # 兜底：任何异常都不能打断阅读
+                return {"ok": False, "error": f"{type(exc).__name__}: {exc}",
+                        "rows": [], "alive": True}
+            self.grobid_result = result
+            record = dict(store.load_paper(self.key) or {})
+            record["grobid"] = result
+            store.save_paper(record)
+            rows = metadata_compare.build_comparison(self.metadata, result)
+            return {"ok": True, "error": None, "alive": True,
+                    "summary": grobid_client.summarize(result),
+                    "rows": payload_module.comparison_payload(rows)}
+
+    def apply_grobid(self, store_key: str, value: str, is_list: bool = False) -> dict:
+        """
+        采信 GROBID 的某个字段。
+
+        列表字段走 `metadata_compare.merge_missing`（**只补空、不覆盖**，与 Streamlit 版同一套逻辑）；
+        单值字段直接写入人工修正。两者都落进记录的 `edits`，两个前端都看得见。
+        """
+        from utils import metadata_compare
+
+        with self._lock:
+            if store_key not in payload_module.AUTO_FIELDS:
+                return {"ok": False, "error": f"不认识的字段键：{store_key}"}
+            if is_list:
+                current = self.edits.get(store_key)
+                if current is None:
+                    field = getattr(self.metadata, payload_module.AUTO_FIELDS[store_key], None)
+                    current = (field.value if field else "") or ""
+                merged, added = metadata_compare.merge_missing(current, [value])
+                self.edits[store_key] = merged
+                note = f"已补进 {len(added)} 条" if added else "该条目已存在，未重复添加"
+            else:
+                self.edits[store_key] = value
+                note = "已采用 GROBID 的值"
+            ok = self._persist()
+            return {"ok": ok, "note": note, "edits": self.edits,
+                    "metadata": payload_module.metadata_payload(self.metadata, self.edits)}
+
+    # ---------------- 解析诊断（核对用） ----------------
+    def diagnostics(self) -> dict:
+        """把"解析过程发生了什么"整理成前端可显示的数据（口径对齐 Streamlit 版诊断面板）"""
+        with self._lock:
+            if not self.parse_result:
+                return {}
+            result = self.parse_result
+            images = self.image_result.get("images", [])
+            clusters = result.get("formula_clusters", [])
+            tables = result.get("table_regions", [])
+            return {
+                "blocks": len(result.get("blocks", [])),
+                "paragraphs": len(result.get("paragraphs", [])),
+                "cards": len(result.get("cards", [])),
+                "total_chars": result.get("total_chars", 0),
+                "body_size": result.get("body_size", 0),
+                "elapsed": result.get("elapsed", 0),
+                "pages": [{"page": p["页码"], "layout": p["检测排版"]}
+                          for p in result.get("pages", [])],
+                "formula_regions": [
+                    {"id": payload_module.region_id(c.page, c.rect), "page": c.page,
+                     "members": getattr(c, "member_count", 0),
+                     "preview": (c.text or "")[:70]}
+                    for c in clusters],
+                "table_regions": [
+                    {"id": payload_module.region_id(t.get("page", 0), t.get("rect", (0, 0, 0, 0))),
+                     "page": t.get("page"), "rows": t.get("行数"), "cols": t.get("列数"),
+                     "caption": (t.get("caption") or "")[:60]}
+                    for t in tables],
+                "images": [{"id": f"fig_{i}", "page": img.page, "card": img.card_order,
+                            "pixels": f"{img.pixel_w}×{img.pixel_h}",
+                            "display": f"{img.disp_w:.0f}×{img.disp_h:.0f}pt"}
+                           for i, img in enumerate(images)],
+                "skipped_images": [str(item)[:80]
+                                   for item in self.image_result.get("skipped", [])][:10],
+            }
     # ---------------- 缓存管理 ----------------
     def clear_cache(self, scope: str = "paper") -> dict:
         """清缓存：`paper`=只删这篇的记录（译文是全局的，不动）；`all`=记录 + 全部译文"""

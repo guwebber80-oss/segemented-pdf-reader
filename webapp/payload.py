@@ -176,6 +176,29 @@ def card_payload(card, images_by_card, region_registry) -> dict:
     }
 
 
+def comparison_payload(rows) -> list:
+    """
+    把 metadata_compare 的对照结果整理成前端表格。
+
+    只保留前端要用的列，并且**把「会话键」原样带出去**——它就是 `in_xxx` 这套存储键，
+    采信时直接回传，服务端据此写入人工修正（两个前端同一套键）。
+    """
+    out = []
+    for row in rows or []:
+        out.append({
+            "field": row.get("字段", ""),
+            "local": str(row.get("本地", ""))[:200],
+            "grobid": str(row.get("GROBID", ""))[:200],
+            "verdict": row.get("结论", ""),
+            "actionable": bool(row.get("可采信")),
+            "is_list": row.get("类型") == "list",
+            "store_key": row.get("会话键", ""),
+            "raw": str(row.get("GROBID原始", row.get("GROBID", "")))[:400],
+            "added": row.get("新增", []),
+        })
+    return out
+
+
 def metadata_payload(metadata, edits=None) -> dict:
     """
     元数据十个字段：**人工修正优先**，同时把自动提取的原值也带上。

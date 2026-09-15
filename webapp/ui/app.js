@@ -264,6 +264,7 @@ function renderMeta() {
     + `${paper.backend ? ' · 翻译后端 ' + esc(paper.backend) : ' · ⚠️ 没有可用翻译后端'}`;
   renderCache(paper.cache);
   refreshCoverage();
+  renderDiagnostics();
 }
 
 function renderCache(cache) {
@@ -393,6 +394,102 @@ async function resetMetadata() {
   } catch (err) {
     $('meta-saved').textContent = '还原失败：' + err.message;
   }
+}
+
+/* GROBID 交叉校验：并排对照 + 逐字段一键采信（列表只补空不覆盖） */
+async function grobidStatus() {
+  try {
+    const status = await api('/api/grobid/status');
+    $('grobid-status').innerHTML = status.alive
+      ? `✅ 服务正常（${esc(status.url)}）`
+      : `⚠️ ${esc(status.message)}<br>不影响阅读——上面字段仍是本地规则的结果。用这条命令启动：`
+        + `<code>docker run --rm --init --ulimit core=0 -p 8070:8070 grobid/grobid:0.9.1-crf</code>`;
+    $('btn-grobid').disabled = !status.alive && !state.paper;
+  } catch (e) { $('grobid-status').textContent = '探测 GROBID 失败：' + e.message; }
+}
+
+async function runGrobid() {
+  const button = $('btn-grobid');
+  button.disabled = true;
+  button.textContent = '⏳ 正在调用 GROBID（首次约 5~10 秒）…';
+  try {
+    const result = await api('/api/grobid', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    if (!result.ok) {
+      $('grobid-status').innerHTML = '⚠️ ' + esc(result.error || '调用失败');
+      $('grobid-rows').innerHTML = '';
+      return;
+    }
+    $('grobid-status').innerHTML = '✅ ' + esc(result.summary || '已完成');
+    renderGrobidRows(result.rows || []);
+  } catch (err) {
+    alert('GROBID 调用失败：' + err.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = '🔍 运行 GROBID 校验';
+  }
+}
+
+function renderGrobidRows(rows) {
+  if (!rows.length) { $('grobid-rows').innerHTML = '<div class="cache">没有可比字段。</div>'; return; }
+  $('grobid-rows').innerHTML = rows.map((row, index) => {
+    const action = row.actionable
+      ? `<button class="hbtn take" data-key="${esc(row.store_key)}" data-list="${row.is_list ? 1 : 0}"
+           data-value="${esc(row.raw)}">采信 GROBID</button>` : '';
+    return `<div class="grow-row"><div class="grow-head"><b>${esc(row.field)}</b>`
+      + `<span class="verdict">${esc(row.verdict)}</span></div>`
+      + `<div class="grow-line"><span>本地</span>${esc(row.local) || '—'}</div>`
+      + `<div class="grow-line"><span>GROBID</span>${esc(row.grobid) || '—'}</div>${action}</div>`;
+  }).join('');
+}
+
+async function takeGrobid(button) {
+  button.disabled = true;
+  try {
+    const result = await api('/api/grobid/apply', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ store_key: button.dataset.key, value: button.dataset.value,
+                             is_list: button.dataset.list === '1' }),
+    });
+    if (!result.ok) { alert(result.error || '采信失败'); return; }
+    if (result.metadata) state.paper.metadata = result.metadata;
+    renderMeta();
+    button.textContent = '✅ ' + (result.note || '已采信');
+  } catch (err) {
+    alert('采信失败：' + err.message);
+    button.disabled = false;
+  }
+}
+
+/* 解析诊断：把"解析过程发生了什么"如实列出来，便于核对"有没有误杀/漏检" */
+async function renderDiagnostics() {
+  if (!state.paper) { $('diag-body').innerHTML = ''; return; }
+  try {
+    const data = await api('/api/diagnostics');
+    const d = data.diagnostics || {};
+    if (!d.cards && !d.pages) { $('diag-body').innerHTML = ''; return; }
+    const kv = [
+      ['原子块 / 段落', `${d.blocks} / ${d.paragraphs}`],
+      ['阅读卡片', d.cards], ['全文提取字符', d.total_chars],
+      ['正文字号基准', d.body_size + ' pt'], ['解析耗时', d.elapsed + ' 秒'],
+      ['公式区域 / 表格区域', `${(d.formula_regions || []).length} / ${(d.table_regions || []).length}`],
+      ['插图 / 跳过', `${(d.images || []).length} / ${(d.skipped_images || []).length}`],
+    ].map(([k, v]) => `<div class="kv"><span>${esc(k)}</span><span>${esc(v)}</span></div>`).join('');
+    const pages = (d.pages || []).map((p) => `第${p.page}页 ${p.layout}`).join(' · ');
+    const regions = (d.formula_regions || []).slice(0, 12).map((r) =>
+      `<li>第 ${r.page} 页 · ${r.members} 块 · ${esc(r.preview)}</li>`).join('');
+    const tables = (d.table_regions || []).slice(0, 8).map((t) =>
+      `<li>第 ${t.page} 页 · ${t.rows}×${t.cols} 列 · ${esc(t.caption || '')}</li>`).join('');
+    const imgs = (d.images || []).slice(0, 10).map((m) =>
+      `<li>第 ${m.page} 页 · ${esc(m.pixels)} px · ${esc(m.display)} · `
+      + `${m.card ? '关联卡片 #' + esc(m.card) : '未关联卡片'}</li>`).join('');
+    $('diag-body').innerHTML = kv
+      + `<div class="cache" style="margin-top:6px">排版：${esc(pages)}</div>`
+      + (regions ? `<div class="cache"><b>公式区域</b><ul class="diag">${regions}</ul></div>` : '')
+      + (tables ? `<div class="cache"><b>表格区域</b><ul class="diag">${tables}</ul></div>` : '')
+      + (imgs ? `<div class="cache"><b>插图</b><ul class="diag">${imgs}</ul></div>` : '');
+    $('diag-note').textContent = '这些数字来自本次解析；用它核对"有没有误杀真正文 / 漏掉公式表格"。';
+  } catch (e) { /* 诊断拿不到不影响阅读 */ }
 }
 
 /* 用当前设置重新解析（不用重新上传）：设置会随记录一起存下来，两个前端一致 */
@@ -546,6 +643,10 @@ function bind() {
   $('btn-clear-one').addEventListener('click', () => clearCache('paper'));
   $('btn-clear-all').addEventListener('click', () => clearCache('all'));
   $('btn-reparse').addEventListener('click', reparse);
+  $('btn-grobid').addEventListener('click', runGrobid);
+  $('grobid-rows').addEventListener('click', (e) => {
+    const btn = e.target.closest('button.take'); if (btn) takeGrobid(btn);
+  });
   $('set-words').addEventListener('input', (e) => { $('set-words-label').textContent = e.target.value; });
   $('table-seg').addEventListener('click', (e) => {
     const btn = e.target.closest('button'); if (!btn) return;
@@ -605,6 +706,7 @@ function bind() {
 loadPrefs();
 bind();
 renderChrome();
+grobidStatus();
 api('/api/status').then((status) => {
   if (!status.has_paper) return;
   $('status').innerHTML = `上次打开过 <b>${esc(status.file.name)}</b>（${status.cache_hit ? '已命中缓存' : '未命中'}）<br>`
