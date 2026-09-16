@@ -407,7 +407,10 @@ async function grobidStatus() {
       : `⚠️ ${esc(status.message)}<br>不影响阅读——上面字段仍是本地规则的结果。`
         + `启动方式：<code>启动网页版.bat</code> 会自动拉起；手动则 <code>docker run --rm --init `
         + `--ulimit core=0 -p 8070:8070 grobid/grobid:0.9.1-crf</code>`
-        + `<br>刚启动的话点「↻ 重新探测」（服务要十几秒才就绪）。`;
+        + `<br>刚启动的话点「↻ 重新探测」（服务要十几秒才就绪）。`
+        // 最常见的坑：容器确实在跑，但启动时漏了 -p 8070:8070，PORTS 一栏是空的 → 外部永远连不上
+        + `<br>若 <code>docker ps</code> 里能看到 grobid 容器但 <b>PORTS 一栏是空的</b>，`
+        + `说明启动时漏了 <code>-p 8070:8070</code>，容器再正常也连不上——删掉它重跑上面的命令即可。`;
   } catch (e) { $('grobid-status').textContent = '探测 GROBID 失败：' + e.message; }
 }
 
