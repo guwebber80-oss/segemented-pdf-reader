@@ -2099,7 +2099,11 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
             figure_excluded = frozenset(i for region in found_regions
                                         for i in region.atom_indices)
             found_figures, figure_failures = figure_finder.find_figure_regions(
-                blocks, page_probes, page_sizes, body_size, excluded=figure_excluded)
+                blocks, page_probes, page_sizes, body_size, excluded=figure_excluded,
+                # 已确认**且会呈现**的表格区域：与它重叠的地方已经有表格图了，
+                # 不能再当图区域截一遍（阶段 4.7；实测 cn 样本第 6 页那块"题注上方的图"
+                # 其实是 Table 3，与表格区域重叠 92%）
+                avoid_rects=[(region.page, region.rect) for region in table_regions])
             apply_figure_regions(blocks, found_figures)
             # 一个成员都没标上的区域是"图内文字本来就是矢量轮廓"那种，
             # 它照样出图（atom_indices 为空），所以这里不做过滤

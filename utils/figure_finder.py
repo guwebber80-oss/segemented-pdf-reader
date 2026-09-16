@@ -13,18 +13,37 @@ figure_finder —— 矢量图页的「图区域」定位（阶段 4.6，**默�
     第 2 页 24 块 / 48 词，第 3 页 40 块 / 50 词，第 4 页 130 块 / 253 词
 全是图内小字，`page.get_images() == []`（第 3 页）而矢量路径 208 项。
 
-【为什么闸门必须是「页级」】
+【闸门分两级：页级预筛 + 区域级位图覆盖率】（阶段 4.7 修正，用户报障驱动）
 文档级判据不可行（11 篇实测）：两篇 NHB 的元数据相同但真值相反；
 矢量密度最高的新 NHB 反而是位图图文献（它的 Reporting Summary 页
 把文字转成了矢量轮廓）；同一篇里两种图页还交错（旧 NHB 第 9 页
 既有 17308pt² 的位图、又有 5477 项矢量）。
-页级判据「矢量路径项 ≥ 20 **且** 页面板级位图（最大位图显示面积）< 8000pt²」
-在 58 个图注页上：准确率 0.983 / 精确率 1.000 / 召回 0.909
-—— 单独用「矢量 > 100」的精确率只有 0.444，所以两个条件缺一不可。
 
-⚠️ 8000pt² 这个阈值本身是**脆的**：旧 NHB 第 19 页 9380.7（落在线上方，漏检）、
-第 20 页 7240.4（落在下方）就在阈值两侧。所以它必须是一个模块顶部常量，
-将来调阈值只改一处、并且要重跑 58 个图注页的准确率/精确率。
+原来只有一条**页级**闸门：「矢量路径项 ≥ 20 且 页面板级位图 < 8000pt²」。
+用户实测报障（旧 NHB 第 2/9/18/19 页的图"截取失败或只拿到位图那一块、没有矢量"）：
+这些页的插图本来是**位图 + 大量矢量的混合体**，而页级闸门只看"这页有没有大位图"，
+于是整页被否掉——位图由 image_extractor 照旧抠出来显示，而坐标轴/面板/示意图
+（矢量部分）就永远没人画。实测这四页的区域级位图覆盖率：
+    第 2 页 18% · 第 9 页 39% · 第 19 页 36%   → 混合页，**应该截图**
+    第 22 页 81%                              → 纯位图图，交给位图提取路径
+可见"该不该截图"是**区域**的属性、不是页的属性（第 22 页与第 19 页在同一篇里交错）。
+所以闸门改成两级：
+    ① **页级预筛**（should_probe_page）：矢量路径项 ≥ FIG_VECTOR_MIN
+       —— 只决定"这页值不值得去定位图区域"（正文页的分隔线/框线也算矢量，
+          所以真正把关的是下面的区域级判据与 find_figure_regions 的体检）；
+    ② **区域级判定**：区域内位图显示面积的**并集** / 区域面积 ≥
+       FIG_REGION_MAX_BITMAP_COVER（默认 0.60）→ 这一块本来就由位图提取路径呈现，
+       不做区域截图；< 阈值 → 截图（区域截图天然把位图也渲染进去，混合页因此能一张看全）。
+
+⚠️ 覆盖率必须用**并集**、不能把各矩形面积求和：同一页里同一张图会被重复摆放，
+旧 NHB 第 19 页有 22 个显示矩形、其实只有 8 张图（求和得到 125% 的假覆盖率，
+会把该截图的那一页否掉）。
+⚠️ 与**已确认的表格区域**重叠的图区域一律放弃：实测 cn 样本（npj Digital Medicine）
+第 6 页"Fig. 6"题注上方那一块其实是 Table 3，与表格区域重叠 92%——不挡的话，
+同一张表会以「图区域」的名义再出一遍（而且表内文字会被移出正文流）。
+⚠️ FIG_MAX_BITMAP_AREA（8000pt²）与 FIG_VECTOR_MIN 都**保留**为页级常量：
+它们不再决定"截不截图"，但仍用于诊断口径（"纯矢量图页"）与回退，
+且 should_capture_page 的旧行为逐条不变（tests/test_figure_region.py ① 钉住）。
 
 【区域定位为什么不能按 bbox 截】
 矢量 bbox 的并集≈整页（占 75% 面积）—— 但那是**整页**并集，不是图区。
@@ -48,8 +67,17 @@ from dataclasses import dataclass, field
 # ------------------------------------------------------------
 # 阈值（全部集中在这里：调阈值只改这一处）
 # ------------------------------------------------------------
-FIG_VECTOR_MIN = 20             # 页级闸门：矢量路径项 ≥ 这个数
-FIG_MAX_BITMAP_AREA = 8000.0    # 页级闸门：最大位图显示面积 < 这个值（pt²；阈值脆，见模块说明）
+FIG_VECTOR_MIN = 20             # 页级预筛：矢量路径项 ≥ 这个数（见模块说明：不再看位图）
+FIG_MAX_BITMAP_AREA = 8000.0    # 「纯矢量图页」口径：最大位图显示面积 < 这个值（pt²；仅供诊断与旧口径）
+# 区域级闸门（阶段 4.7）：区域内位图显示面积的**并集**占区域面积的比例 ≥ 这个值
+# → 这块本来就由位图提取路径呈现，不做区域截图。实测旧 NHB：p2 18% / p9 39% / p19 36%
+# （混合页，要截图）· p22 81%（纯位图图，交给位图路径）。改这个值必须重跑这四页的核对。
+FIG_REGION_MAX_BITMAP_COVER = 0.60
+# 与已确认表格区域的重叠比例上限（占较小者面积）：超过就放弃——那块地方已经有表格图了
+FIG_TABLE_OVERLAP_MAX = 0.5
+# 「位图已被区域截图吸收」的判据：位图矩形落在图区域里的比例达到这个值就不再单独呈现
+# （区域截图天然包含位图，两条都出就是同一张图出现两次）
+FIG_IMAGE_IN_REGION_RATIO = 0.5
 FIG_GAP_MIN_PT = 8.0            # 聚类间隙下限
 FIG_GAP_FACTOR = 1.2            # 聚类间隙 = max(下限, 系数 × 簇内中位字号)
 FIG_GAP_MAX_PT = 45.0           # 间隙上限（见 cluster_by_gap：只有空隙里真有矢量图形时才放宽到这里）
@@ -142,7 +170,7 @@ def _is_furniture(box, page_rect) -> bool:
 
 def probe_page(page) -> dict:
     """
-    探测一页的「矢量路径项数 / 最大位图显示面积 / 矢量路径矩形列表」。
+    探测一页的「矢量路径项数 / 位图显示面积与矩形 / 矢量路径矩形列表」。
 
     这是本模块**唯一**碰 PDF 的函数（其余都是纯函数，便于单测）。
 
@@ -151,7 +179,15 @@ def probe_page(page) -> dict:
         **不要用 `page.get_image_info()`**：它会把渐变着色也报成图、还会给出
         xref=0 的假条目（上一轮取证已确认）。
       · `get_bboxlog()` 里区分矢量（fill-path / stroke-path）与位图（fill-image），
-        正是页级闸门要的信息。
+        正是页级预筛要的信息。
+
+    返回：
+        vector_items    矢量路径项数
+        bitmap_max_area 最大位图显示面积（pt²，诊断口径用）
+        bitmap_rects    全部位图显示矩形 [(x0, y0, x1, y1), …]（含同一张图的重复摆放，
+                        区域级覆盖率自己会取并集，所以这里不去重）
+        vector_boxes    裁到页面内、剔除页眉页脚细横线之后的矢量路径矩形
+        types           各绘图指令的条数（诊断用）
     """
     page_rect = (page.rect.x0, page.rect.y0, page.rect.x1, page.rect.y1)
     vector_items, boxes, type_counter = 0, [], Counter()
@@ -166,36 +202,109 @@ def probe_page(page) -> dict:
             continue
         boxes.append(clipped)
 
-    areas = []
+    areas, bitmap_rects = [], []
     for info in page.get_images(full=True):
         for rect in page.get_image_rects(info[0]):
             areas.append(max(rect.width, 0.0) * max(rect.height, 0.0))
+            bitmap_rects.append((rect.x0, rect.y0, rect.x1, rect.y1))
 
     return {
         "vector_items": vector_items,
         "bitmap_max_area": max(areas) if areas else 0.0,
+        "bitmap_rects": bitmap_rects,
         "vector_boxes": boxes,
         "types": dict(type_counter),
     }
 
 
-def should_capture_page(probe) -> bool:
+def should_probe_page(probe) -> bool:
     """
-    页级闸门：这一页要不要尝试图区域截图？
+    页级**预筛**：这一页值不值得去定位图区域？—— 只看「矢量路径项 ≥ FIG_VECTOR_MIN」。
 
-        矢量路径项 ≥ FIG_VECTOR_MIN（默认 20）  且
-        页面板级位图（最大位图显示面积）< FIG_MAX_BITMAP_AREA（默认 8000pt²）
-
-    两条同时成立才过闸门。为什么缺一不可（58 个图注页实测）：
-      · 只看「矢量 ≥ 20」→ 精确率掉到 0.444（正文页的分隔线、表格框线也算矢量）；
-      · 只看「没有大位图」→ 纯文字页全都过闸门。
-    两者同时用：准确率 0.983 / 精确率 1.000 / 召回 0.909。
+    阶段 4.7 起页级不再看位图大小：混合图页（位图 + 大量矢量）本来就该截图，
+    而"该不该截图"改由**区域级**判据（bitmap_cover_ratio）决定，见模块说明。
+    这一条仍然必要：正文页的分隔线与表格框线也会产生矢量项，
+    完全没有矢量的页面（纯文字/纯位图）连定位都不用试。
     """
     if not probe:
         return False
-    if int(probe.get("vector_items", 0)) < FIG_VECTOR_MIN:
+    return int(probe.get("vector_items", 0)) >= FIG_VECTOR_MIN
+
+
+def is_pure_vector_page(probe) -> bool:
+    """这页是不是「纯矢量图页」（旧口径的第二条：没有面板级位图）。诊断与旧口径沿用"""
+    if not probe:
         return False
     return float(probe.get("bitmap_max_area", 0.0)) < FIG_MAX_BITMAP_AREA
+
+
+def should_capture_page(probe) -> bool:
+    """
+    **旧口径**（阶段 4.6 的页级闸门）：矢量路径项 ≥ FIG_VECTOR_MIN **且** 没有面板级位图。
+
+    阶段 4.7 之后它**不再决定截不截图**——真正的判定在区域级
+    （见 find_figure_regions 里的 FIG_REGION_MAX_BITMAP_COVER）。
+    保留它有两个用处：
+      · 诊断面板上的「纯矢量图页」计数（figure_report.gate_pages）；
+      · 作为"这一类页肯定要走图区域"的**无条件通行证**：旧口径能过的页，
+        区域级判据不必再拦（否则一块被位图铺满的小区域会被新判据否掉，
+        而它本来就在旧行为里出过图）。
+    两条判据的意义与阈值都没变，tests/test_figure_region.py ① 逐条钉住。
+    """
+    return should_probe_page(probe) and is_pure_vector_page(probe)
+
+
+def union_area(rects, clip=None) -> float:
+    """
+    一组矩形（先裁到 clip）的**并集**面积 —— 精确值，不用栅格近似。
+
+    为什么要并集：同一页里同一张图会被重复摆放（旧 NHB 第 19 页 22 个显示矩形
+    其实只有 8 张图），把各矩形面积直接相加会得到 125% 这种假覆盖率。
+    做法：取全部 x 边界切片，每片内把 y 区间合并后累加。
+    """
+    shapes = []
+    for rect in rects or ():
+        x0, y0, x1, y1 = rect
+        if clip is not None:
+            x0, y0 = max(x0, clip[0]), max(y0, clip[1])
+            x1, y1 = min(x1, clip[2]), min(y1, clip[3])
+        if x1 > x0 and y1 > y0:
+            shapes.append((x0, y0, x1, y1))
+    if not shapes:
+        return 0.0
+    xs = sorted({shape[0] for shape in shapes} | {shape[2] for shape in shapes})
+    total = 0.0
+    for i in range(len(xs) - 1):
+        left, right = xs[i], xs[i + 1]
+        if right <= left:
+            continue
+        middle = (left + right) / 2
+        spans = sorted((shape[1], shape[3]) for shape in shapes
+                       if shape[0] <= middle <= shape[2])
+        if not spans:
+            continue
+        covered, cur_top, cur_bottom = 0.0, spans[0][0], spans[0][1]
+        for top, bottom in spans[1:]:
+            if top <= cur_bottom:
+                cur_bottom = max(cur_bottom, bottom)
+            else:
+                covered += cur_bottom - cur_top
+                cur_top, cur_bottom = top, bottom
+        covered += cur_bottom - cur_top
+        total += covered * (right - left)
+    return total
+
+
+def bitmap_cover_ratio(bitmap_rects, rect) -> float:
+    """
+    区域里被**位图**盖住的面积比例（0~1）—— 区域级闸门的核心数字。
+
+    取并集（不是求和），并裁到区域矩形里：只有真正落在区域内的那部分位图才作数。
+    """
+    area = _area(rect)
+    if area <= 0:
+        return 0.0
+    return union_area(bitmap_rects, rect) / area
 
 
 # ------------------------------------------------------------
@@ -375,7 +484,8 @@ def _is_anchor(block, body_size=None) -> bool:
 
 
 def find_figure_regions(blocks, page_probes, page_sizes, body_size,
-                        excluded=frozenset(), excluded_roles=BACKGROUND_ROLES):
+                        excluded=frozenset(), excluded_roles=BACKGROUND_ROLES,
+                        avoid_rects=()):
     """
     找出全部图区域。返回 (regions, failures)：
         regions   [FigureRegion, …]，按 (页码, y) 排序
@@ -389,6 +499,9 @@ def find_figure_regions(blocks, page_probes, page_sizes, body_size,
         body_size    : 正文字号（判「图内小字」与「正文块」的基准）
         excluded     : **已确认为表格/公式区域的原子块下标**（必须扣除，不能重复出图）
         excluded_roles : 不参与判定的角色（背景信息与标题）
+        avoid_rects  : **已确认的表格区域** `[(页码, (x0, y0, x1, y1)), …]`：同页上与之重叠
+                       的区域放弃（阶段 4.7；默认空 = 旧行为）。必须带页码——只比矩形会
+                       把不同页上坐标相近的地方误判成重叠。
 
     定位三步（顺序不能换）：
       ① **题注锚点定下界**：只认「图题注」抬头（Fig./Figure/Extended Data Fig.…）；
@@ -397,12 +510,21 @@ def find_figure_regions(blocks, page_probes, page_sizes, body_size,
       ③ **矢量并集撑矩形**：把矩形撑到「题注上方全部矢量路径」的范围，
          这样图形的描边与边距不会被切掉；再外扩 FIG_PAD_PT、下界夹到题注上方。
     没通过体检（太窄/太扁/面积超限/框进正文/与前一个图区重叠）就**放弃截图**并记一条 failure。
+
+    区域级闸门（阶段 4.7，用户报障驱动）——体检之后、出图之前再看两条：
+      · `avoid_rects`（已确认的表格区域）里有谁与它重叠超过 FIG_TABLE_OVERLAP_MAX
+        → 放弃（那块地方已经有表格图，再截一次就是把表格当图出两遍）；
+      · 区域内位图显示面积的并集占比 ≥ FIG_REGION_MAX_BITMAP_COVER
+        → 放弃（这一块本来就由位图提取路径呈现）。
+      例外：过**旧页级闸门**（should_capture_page = 纯矢量图页）的区域无条件放行
+      —— 那一类页在 4.6 里就出图，不能因为新判据把已有行为吞掉。
     """
     regions, failures = [], []
     for page in sorted(page_probes):
         probe = page_probes[page]
-        if not should_capture_page(probe):
-            continue
+        if not should_probe_page(probe):
+            continue                          # 页级预筛：矢量太少（纯文字/纯位图）不必试
+        pure_vector_page = should_capture_page(probe)   # 旧口径：这一类页无条件放行
         page_blocks = [i for i, b in enumerate(blocks) if b.page == page]
         if not page_blocks:
             continue
@@ -411,7 +533,7 @@ def find_figure_regions(blocks, page_probes, page_sizes, body_size,
                    and blocks[i].role not in excluded_roles
                    and _is_anchor(blocks[i])]
         if not anchors:
-            continue                          # 过闸门但这一页没有图题注：无事可做
+            continue                          # 过了预筛但这一页没有图题注：无事可做
         page_size = page_sizes.get(page, (595.0, 842.0))
         claimed = []
 
@@ -481,6 +603,25 @@ def find_figure_regions(blocks, page_probes, page_sizes, body_size,
             reason = _reject_reason(rect, page, page_size, blocks, members, excluded, body_size)
             if not reason and any(_overlap_ratio(rect, other) > FIG_OVERLAP_MAX for other in claimed):
                 reason = "与前一个图区重叠（同一张图被两条题注各判一次）"
+            if not reason:
+                # 区域级闸门之一：与已确认的表格区域重叠 → 那块地方已经有表格图了
+                # ⚠️ avoid_rects 必须带页码：(页码, 矩形) —— 只比矩形的话，
+                # 不同页上"坐标恰好相近"的地方会被误判成重叠（实测：旧 NHB 第 6 页的表格
+                # 把第 3/4/10/23 页本来正常的图区域全否掉了）。
+                for avoid_page, avoid in avoid_rects or ():
+                    if int(avoid_page) != page:
+                        continue
+                    if _overlap_ratio(rect, tuple(avoid)) > FIG_TABLE_OVERLAP_MAX:
+                        reason = "与已确认的表格区域重叠（表格已单独出图，不再当图截一遍）"
+                        break
+            if not reason and not pure_vector_page:
+                # 区域级闸门之二：区域内位图覆盖率过高 → 交给位图提取路径
+                # （过旧页级闸门的「纯矢量图页」不做这一条：那类页在 4.6 里就出图，
+                #   不能因为一块被位图铺满的小区域被新判据吞掉已有的出图行为）
+                cover = bitmap_cover_ratio(probe.get("bitmap_rects", ()), rect)
+                if cover >= FIG_REGION_MAX_BITMAP_COVER:
+                    reason = (f"区域内位图覆盖 {cover:.0%}（≥ {FIG_REGION_MAX_BITMAP_COVER:.0%}）"
+                              f"——这一块由位图提取路径呈现，不做区域截图")
             if reason:
                 failures.append({"page": page, "caption": caption[:40], "reason": reason})
                 continue
@@ -499,6 +640,39 @@ def find_figure_regions(blocks, page_probes, page_sizes, body_size,
     return regions, failures
 
 
+def covered_image_indices(images, regions, min_ratio: float = FIG_IMAGE_IN_REGION_RATIO) -> list:
+    """
+    哪些**已提取的位图**已经被图区域截图吸收了（阶段 4.7 的去重）—— 返回下标列表。
+
+    区域截图是把整块矩形渲染出来，位图本来就在里面；如果位图再单独出一遍，
+    用户会看到同一张图出现两次。判据：位图矩形落在某个图区域里的比例 ≥ min_ratio
+    （默认 0.5）。
+
+    纯函数、不碰 PDF：吃的是 image_extractor.ImageItem（只读 page/bbox）与 FigureRegion。
+    ⚠️ 返回**下标**而不是对象：ImageItem 是非 frozen 的 dataclass，`==` 会逐字段比较
+    （包含 thumb 那串 PNG 字节），用对象做 `in`/集合既慢又容易踩"两张一模一样的图"
+    这种语义陷阱；下标没有这个问题。
+
+    开关关掉时 figure_regions 恒为空列表 → 这里恒返回空 → 与旧行为逐字段一致。
+    """
+    hidden = []
+    by_page = {}
+    for region in regions or ():
+        by_page.setdefault(int(region.page), []).append(tuple(region.rect))
+    for index, image in enumerate(images or ()):
+        rects = by_page.get(int(getattr(image, "page", 0) or 0))
+        if not rects:
+            continue
+        box = tuple(getattr(image, "bbox", ()) or ())
+        if len(box) != 4:
+            continue
+        for rect in rects:
+            if _overlap_ratio(box, rect) >= min_ratio:
+                hidden.append(index)
+                break
+    return hidden
+
+
 def figure_report(blocks, page_probes, excluded_roles=BACKGROUND_ROLES) -> dict:
     """
     诊断数字（右栏「解析诊断」显示用）：
@@ -506,10 +680,12 @@ def figure_report(blocks, page_probes, excluded_roles=BACKGROUND_ROLES) -> dict:
         caption_pages            有图题注锚点的页
         caption_pages_no_bitmap  其中**没有面板级位图**的页 —— 就是
                                  「本篇 N 个图注页无面板级位图」里的 N
-        gate_pages               过闸门的页（矢量够 + 没有面板级位图）
+        gate_pages               过**旧页级闸门**的页（矢量够 + 没有面板级位图）
+        probe_pages              过**页级预筛**的页（只要矢量够；阶段 4.7 起
+                                 真正去定位图区域的就是这一组，混合图页也在里面）
 
     注意 caption_pages_no_bitmap 只看位图面积这一条：它是"值得关注的图注页"的口径，
-    与闸门（还要求矢量 ≥ 20）不同 —— 两者的差集就是"图注页但矢量也不足"的那些页。
+    与页级预筛（还要求矢量 ≥ 20）不同 —— 两者的差集就是"图注页但矢量也不足"的那些页。
     """
     caption_pages = sorted({b.page for b in blocks
                             if b.role not in excluded_roles and _is_anchor(b)})
@@ -518,9 +694,13 @@ def figure_report(blocks, page_probes, excluded_roles=BACKGROUND_ROLES) -> dict:
                  < FIG_MAX_BITMAP_AREA]
     gate_pages = [page for page, probe in sorted(page_probes.items())
                   if should_capture_page(probe)]
+    probe_pages = [page for page, probe in sorted(page_probes.items())
+                   if should_probe_page(probe)]
     return {"caption_pages": caption_pages,
             "caption_pages_no_bitmap": no_bitmap,
             "gate_pages": gate_pages,
+            "probe_pages": probe_pages,
             "caption_page_count": len(caption_pages),
             "caption_pages_no_bitmap_count": len(no_bitmap),
-            "gate_page_count": len(gate_pages)}
+            "gate_page_count": len(gate_pages),
+            "probe_page_count": len(probe_pages)}

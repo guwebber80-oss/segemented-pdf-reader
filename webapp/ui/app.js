@@ -491,8 +491,12 @@ function figureDiagLine(d) {
       ? '本页无图注（未探测到矢量图页）' : '未启用（左栏「解析设置」可打开）';
   }
   const failed = (d.figure_failures || []).length;
+  // 阶段 4.7 起闸门分两级：页级预筛（矢量够多）决定"去不去定位"，
+  // 真正截不截图由**区域级**判据决定，所以这里两个数字都给出来，别让用户以为只看了纯矢量页。
+  const probe = stats.probe_page_count === undefined ? stats.gate_page_count : stats.probe_page_count;
   return `本篇 ${stats.caption_pages_no_bitmap_count || 0} 个图注页无面板级位图 · `
-    + `过闸门 ${stats.gate_page_count || 0} 页 · 定位成功 ${(d.figure_regions || []).length} 个`
+    + `页级预筛 ${probe || 0} 页（其中纯矢量图页 ${stats.gate_page_count || 0} 页）· `
+    + `定位成功 ${(d.figure_regions || []).length} 个`
     + (failed ? ` · 定位失败 ${failed} 个` : '');
 }
 

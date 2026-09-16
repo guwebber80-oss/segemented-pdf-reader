@@ -14,6 +14,7 @@ HTTP 层只负责搬运字节，于是这一层可以**完全离线单测**（�
 
 import re
 
+from utils import figure_finder
 from utils import store
 
 # 视作「正文/标题」、需要翻译的段落类型
@@ -313,7 +314,13 @@ def build_paper_payload(pdf_bytes, file_name, parse_result, image_result, associ
 
     registry = {}
     images_by_card = {}
-    for index, image in enumerate(images):
+    # 去重（阶段 4.7）：已经被「图区域截图」吸收的位图不再单独呈现——
+    # 区域截图是把整块矩形渲染出来，位图本来就在里面，再出一遍就是同一张图出现两次。
+    # 开关关掉时 figure_regions 恒为空列表 → covered 恒为空 → 与旧行为逐字段一致。
+    covered = set(figure_finder.covered_image_indices(
+        images, parse_result.get("figure_regions", ())))
+    visible_images = [image for index, image in enumerate(images) if index not in covered]
+    for index, image in enumerate(visible_images):
         ident = figure_id(index, image)
         card_order = getattr(image, "card_order", None)
         meta = (f"第 {image.page} 页 · {image.pixel_w}×{image.pixel_h} px"
@@ -338,7 +345,7 @@ def build_paper_payload(pdf_bytes, file_name, parse_result, image_result, associ
         "position": int(position or 0),
         "settings": settings_payload(settings),
         "show_all": show_all,
-        "overview": overview_payload(parse_result, payload_cards, images, table_regions),
+        "overview": overview_payload(parse_result, payload_cards, visible_images, table_regions),
         "metadata": metadata_payload(metadata, edits),
         "cards": payload_cards,
         "backend": backend,

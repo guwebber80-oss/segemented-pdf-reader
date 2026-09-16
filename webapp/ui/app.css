@@ -15,6 +15,14 @@
   --read-size:17px; --read-lh:1.85;
   /* 三块区域各自的高度：整页锁死，所以这里必须减掉"页头 + 页脚 + 内边距" */
   --side-h: calc(100vh - 28px);
+  /* ⚠️ --deck-h 现在只是卡片高度的**上限**（.deck 的 max-height），不是"精确等于"的高度。
+     为什么改口径（用户实测报障）：卡片原来写的是 height:var(--deck-h)，也就是拿一个
+     手调出来的视口常量当卡片高度，**完全不管 .deck-wrap 实际剩多少地方**。
+     只要这个常量比实际剩余高度大（宽松档 −86px 一定如此；页头/页脚比常量高时也一样，
+     例如进度点在窄窗口里折成两行），卡片就会从 .deck-wrap 底部溢出去；而 .deck-wrap 是
+     position:relative（属于定位元素层）、.stage-foot 是普通流元素，所以**卡片会画在进度点
+     上面**——这就是"卡片进度示意与卡片低端重合"。改成上限后，可视高度由 .deck-wrap 的
+     真实高度决定，常量只负责"别超过它"，任何窗口/字号/档位下都不会再压住进度点。 */
   --deck-h: calc(100vh - 132px);
 }
 body.h-compact{ --deck-h: calc(100vh - 210px); }
@@ -105,9 +113,19 @@ body.immersive .stage-tools{margin-left:auto}
 .pill.ok{border-color:#bfe6d3;color:var(--ok);background:#f2fbf7}
 
 .deck-wrap{flex:1;min-height:0;display:grid;grid-template-columns:60px minmax(0,1fr) 60px;
+  /* 行高用 1fr（= .deck-wrap 自己的真实高度）+ minmax(0,…) 允许收缩：
+     卡片、左右翻页按钮都在这**一行**里对齐。之前没写 grid-template-rows，
+     行高由卡片那个手调的视口常量（--deck-h）撑出来，比容器还高时整行就从容器
+     底部溢出去（见 :root 里 --deck-h 的说明）。 */
+  grid-template-rows:minmax(0,1fr);
   align-items:center;gap:8px;position:relative}
+/* 翻页按钮：**必须显式写 justify-self:center**。grid 的 justify-items 默认是
+   normal→stretch，而 stretch 只对 width:auto 生效；按钮写着 width:52px，于是它按
+   start 对齐，被钉在 60px 轨道的**左端**：左边距 0px（贴着阅读区左边界）、
+   右边距 8px，而右边的 › 是左右各 8px —— 两个按钮因此不对称，看着像"位置偏移"。 */
 .nav-btn{width:52px;height:52px;border-radius:50%;border:1px solid var(--line);background:#fff;
-  box-shadow:var(--shadow);font-size:24px;line-height:1;color:var(--ink-2)}
+  box-shadow:var(--shadow);font-size:24px;line-height:1;color:var(--ink-2);
+  justify-self:center;align-self:center}
 .nav-btn:hover{color:var(--accent);border-color:var(--accent)}
 .nav-btn[disabled]{opacity:.35;cursor:default}
 .scroll-hint{position:absolute;right:22px;bottom:12px;padding:4px 10px;border-radius:999px;
@@ -115,10 +133,16 @@ body.immersive .stage-tools{margin-left:auto}
   transition:opacity .2s ease;pointer-events:none}
 .deck-wrap.more .scroll-hint{opacity:1}
 
-/* 卡片滚动区：固定高度 + 内部滚动（需求①） */
-.deck{height:var(--deck-h);min-height:0;background:var(--panel);border:1px solid var(--line);
-  border-radius:var(--radius);box-shadow:var(--shadow);overflow-y:auto;
-  overscroll-behavior:contain;position:relative;display:flex;flex-direction:column}
+/* 卡片滚动区：**填满 .deck-wrap 给它的那一行**（height:100%），再由 --deck-h 封顶。
+   为什么不是直接 height:var(--deck-h)：那个常量是手调的视口公式，跟页头页脚的实际高度
+   对不上（宽松档 −86px 一定比实际剩余空间大），卡片就会溢到 .deck-wrap 外面、
+   盖住页脚的进度点；而 .deck-wrap 是 position:relative（定位元素层）、
+   .stage-foot 是普通流元素，谁在上面由绘制顺序决定 —— 实测就是"卡片压住进度示意"。
+   改成"填满 + 封顶"：可视高度由真实剩余空间决定，常量只管别超过它。 */
+.deck{height:100%;max-height:var(--deck-h);min-height:0;background:var(--panel);
+  border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);
+  overflow-y:auto;overscroll-behavior:contain;position:relative;display:flex;
+  flex-direction:column}
 /* 内容居中用「子元素 margin:auto」而不是在滚动容器上 align-items:center
    —— 后者在内容超过一屏时会把顶部挤出可视区且滚不上去（CSS 经典坑） */
 .card{padding:34px 48px 42px;width:100%;margin:auto 0;animation:slide .2s ease}
