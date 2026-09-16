@@ -129,7 +129,10 @@
     <div class="group">
       <div class="group-title">GROBID 交叉校验（第二意见）</div>
       <div class="cache" id="grobid-status">正在探测本地 GROBID 服务…</div>
-      <button class="hbtn" id="btn-grobid" title="调用本地 GROBID 抽取头部信息，与本地规则逐字段对照">🔍 运行 GROBID 校验</button>
+      <div class="row">
+        <button class="hbtn" id="btn-grobid" title="调用本地 GROBID 抽取头部信息，与本地规则逐字段对照">🔍 运行 GROBID 校验</button>
+        <button class="hbtn" id="btn-grobid-probe" title="重新探测服务（刚启动 GROBID 时点它，不用刷新页面）">↻ 重新探测</button>
+      </div>
       <div id="grobid-rows"></div>
       <div class="cache" id="grobid-note">GROBID 也不总是对（实测：把期刊名当标题、把题记人名当作者）；
         不一致时请对照原 PDF 判断。它不提供通讯作者与附件链接。</div>

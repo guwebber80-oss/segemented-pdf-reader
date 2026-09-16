@@ -398,13 +398,16 @@ async function resetMetadata() {
 
 /* GROBID 交叉校验：并排对照 + 逐字段一键采信（列表只补空不覆盖） */
 async function grobidStatus() {
+  // 探测是"当下这一刻"的事实，所以：① 启动时探一次；② 提供「↻ 重新探测」（刚拉起 GROBID 时用）；
+  // ③ 运行校验前再探一次（避免因为页面早先加载而显示"未检测到"）
   try {
     const status = await api('/api/grobid/status');
     $('grobid-status').innerHTML = status.alive
       ? `✅ 服务正常（${esc(status.url)}）`
-      : `⚠️ ${esc(status.message)}<br>不影响阅读——上面字段仍是本地规则的结果。用这条命令启动：`
-        + `<code>docker run --rm --init --ulimit core=0 -p 8070:8070 grobid/grobid:0.9.1-crf</code>`;
-    $('btn-grobid').disabled = !status.alive && !state.paper;
+      : `⚠️ ${esc(status.message)}<br>不影响阅读——上面字段仍是本地规则的结果。`
+        + `启动方式：<code>启动网页版.bat</code> 会自动拉起；手动则 <code>docker run --rm --init `
+        + `--ulimit core=0 -p 8070:8070 grobid/grobid:0.9.1-crf</code>`
+        + `<br>刚启动的话点「↻ 重新探测」（服务要十几秒才就绪）。`;
   } catch (e) { $('grobid-status').textContent = '探测 GROBID 失败：' + e.message; }
 }
 
@@ -412,6 +415,7 @@ async function runGrobid() {
   const button = $('btn-grobid');
   button.disabled = true;
   button.textContent = '⏳ 正在调用 GROBID（首次约 5~10 秒）…';
+  await grobidStatus();                       // 先刷新服务状态，避免用早先的探测结果误判
   try {
     const result = await api('/api/grobid', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
@@ -644,6 +648,7 @@ function bind() {
   $('btn-clear-all').addEventListener('click', () => clearCache('all'));
   $('btn-reparse').addEventListener('click', reparse);
   $('btn-grobid').addEventListener('click', runGrobid);
+  $('btn-grobid-probe').addEventListener('click', grobidStatus);
   $('grobid-rows').addEventListener('click', (e) => {
     const btn = e.target.closest('button.take'); if (btn) takeGrobid(btn);
   });

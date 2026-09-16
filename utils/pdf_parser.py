@@ -1137,12 +1137,24 @@ def propagate_paragraph_roles(blocks, paragraphs) -> None:
 
     角色本身是段落级判断（要读完整的一段话才能定），但界面、角色统计、
     背景信息面板都是按块查询的，所以结论要落回原子块。
+
+    ⚠️ 回写前要做一次体检：段落 kind=heading 但**很长**时改回 body。
+    起因是用户实测：npj 的「References」标题与首条文献被并成一段，回写把整段（332 词）
+    标成了小标题；Nature 那篇也有同样问题（121 词的参考文献段、93 词的正文段）。
+    判据用词数就够了——真标题不可能超过 TITLE_MAX_WORDS 词。
     """
     for paragraph in paragraphs:
+        kind, level = paragraph.kind, paragraph.level
+
+        if kind == "heading" and count_words(paragraph.text) > TITLE_MAX_WORDS:
+            kind, level = "body", 0
+            # ⚠️ 段落视图自己也要降级：卡片构建读的是 paragraph.kind，只改回写出去的块
+            # （不改段落）的话，卡片标题依然是那段长文本 —— 这是实测踩到的第二半问题
+            paragraph.kind, paragraph.level = kind, level
         for index in paragraph.atom_indices:
             blocks[index].role = paragraph.role
-            blocks[index].kind = paragraph.kind
-            blocks[index].level = paragraph.level
+            blocks[index].kind = kind
+            blocks[index].level = level
 
 
 def sync_paragraph_formulas(blocks, paragraphs, clusters) -> None:
@@ -1261,6 +1273,35 @@ def url_ratio(text: str) -> float:
     return covered / len(text)
 
 
+# ============================================================
+# 标题判定的两个「排除器」（用户实测：Nature 那篇小标题有误）
+# ============================================================
+TITLE_MAX_WORDS = 25          # 超过这个词数就不可能是章节标题
+_AUTHOR_LINE_RE = re.compile(r"[\^*†‡§]|\b\d(?:,\d)*\b")     # 上标编号 / 角标：作者行的典型特征
+_REAL_WORD_RE = re.compile(r"[A-Za-z]{4,}")                  # 「像词」的词：≥4 个字母
+
+
+def _has_real_word(text: str) -> bool:
+    """至少含一个 ≥4 字母的词——用来把图内标签/坐标轴刻度（"a b c"、"d e 1.0 1.0"）排除掉"""
+    return bool(_REAL_WORD_RE.search(text))
+
+
+def _looks_like_author_line(text: str, words: int) -> bool:
+    """
+    像作者行就返回 True：短、含上标编号或角标、大写开头词多、且没有句末标点。
+
+    为什么不用元数据里的作者列表来比：解析层不该依赖元数据模块（分层约定），
+    而且作者提取本身也依赖这些块的版面位置，容易绕成环。这里只用版面/文本特征。
+    """
+    if words > 30:
+        return False
+    if text.endswith((".", "。", ":", "：")):
+        return False
+    if not _AUTHOR_LINE_RE.search(text):
+        return False
+    caps = len([w for w in text.split() if w[:1].isupper()])
+    return caps >= 3 and caps >= words * 0.5
+
 def mark_headings(blocks, body_size: float) -> None:
     """
     识别标题并标记级别（就地修改 blocks）。
@@ -1279,11 +1320,22 @@ def mark_headings(blocks, body_size: float) -> None:
         words = count_words(text)
         b.kind, b.level = "body", 0
 
-        if not text or words > 25 or len(text) > 200:
+        if not text or words > TITLE_MAX_WORDS or len(text) > 200:
             continue                                   # 太长，不可能是标题
 
         # DOI / URL 行不是标题（见 _URL_LIKE_RE 的说明）
         if url_ratio(text) >= URL_DOMINANT_RATIO:
+            continue
+
+        # 图内标签 / 坐标轴刻度不是标题：真实章节名一定有 ≥4 个字母的词
+        # （实测 Nature 那篇把 "a b c"、"d e 1.0 1.0"、"C0 U ......" 判成了小标题）
+        if not _has_real_word(text):
+            continue
+
+        # 第 1 页的作者行不是标题：实测 Nature 那篇把
+        # "Yunpeng Bai ^1,2, Xiaofu Jin^2,3,4, Shengdong Zhao ⁵ & Antti Oulasvirta" 当成小标题，
+        # 于是连续 3 张卡的标题都变成了作者名单
+        if b.page == 1 and _looks_like_author_line(text, words):
             continue
 
         ratio = (b.max_size / body_size) if body_size else 1.0
