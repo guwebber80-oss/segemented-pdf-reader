@@ -27,6 +27,7 @@
       <label class="chk"><input type="checkbox" id="set-merge" checked> 段落自动合并</label>
       <label class="chk"><input type="checkbox" id="set-dehyphenate" checked> 行尾连字符合并</label>
       <label class="chk"><input type="checkbox" id="set-showall"> 显示全部内容（核对过滤用）</label>
+      <label class="chk" title="用 GROBID 抓到的行内小标题（以句点结尾、与正文同段的那类）把卡片里的「标题 + 正文」拆开加粗显示。需要先在右栏运行一次 GROBID 校验；默认关闭，关掉与旧行为完全一致。"><input type="checkbox" id="set-runin"> 用小标题补丁（需先运行 GROBID 交叉校验）</label>
       <label class="rng">卡片目标词数 <b id="set-words-label">200</b>
         <input type="range" id="set-words" min="100" max="400" step="25" value="200"></label>
       <div class="seg mini" id="table-seg">

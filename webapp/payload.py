@@ -75,6 +75,21 @@ def count_words(text: str) -> int:
     return len([w for w in re.split(r"\s+", (text or "").strip()) if w])
 
 
+def _flag(value, default: bool = False) -> bool:
+    """
+    把设置里的开关统一成布尔值。
+
+    为什么要专门写一个：开关可能从三个地方来——查询串（`runin=0|1` 是**字符串**）、
+    JSON 请求体（真布尔）、以及记录里存下来的旧值。`bool("0")` 是 True，
+    会直接把「关」读成「开」，所以字符串必须单独判。
+    """
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "0", "false", "no", "off")
+    return bool(value)
+
+
 def settings_payload(settings: dict) -> dict:
     """
     解析设置的规范化 + 回显。
@@ -82,6 +97,10 @@ def settings_payload(settings: dict) -> dict:
     **字段名与 Streamlit 版完全一致**（`merge_on / dehyphenate_on / target_words /
     table_mode_label / show_all`），因为设置也写进同一份 `.cache/` 记录——两个前端读同一份，
     换前端不会"设置突然全变了"。
+
+    `runin_patch`（0/1）是阶段 4.5 新增的同级设置：是否启用「行内小标题补丁」。
+    它只影响网页版卡片段落视图的呈现（默认关，关掉就是完全旧行为）；
+    Streamlit 版不读这个键，所以两边仍然共用一份记录、互不干扰。
     """
     settings = settings or {}
     label = settings.get("table_mode_label")
@@ -98,6 +117,7 @@ def settings_payload(settings: dict) -> dict:
         "table_mode_label": label,
         "table_mode": "text" if label == "保留文字" else "image",
         "show_all": bool(settings.get("show_all", False)),
+        "runin_patch": _flag(settings.get("runin_patch"), False),
     }
 
 

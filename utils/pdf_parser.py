@@ -34,6 +34,7 @@ from dataclasses import dataclass, field, fields, replace
 import pymupdf      # PDF 解析核心（PyMuPDF；新版推荐 import pymupdf，旧的 fitz 已弃用）
 
 from . import formula_finder
+from . import runin_headings   # 行内小标题补丁（纯函数，只用于卡片段落视图，见 _build_segments）
 from . import table_finder   # 公式锚点表、三级判据、区域聚类（本模块依赖它，它不反向依赖本模块）
 
 
@@ -1576,7 +1577,7 @@ def _table_payload(paragraph) -> dict:
     }
 
 
-def _build_segments(buffer):
+def _build_segments(buffer, runin_heads=None):
     """
     把缓冲里的段落转成卡片段落。
 
@@ -1590,6 +1591,13 @@ def _build_segments(buffer):
     一个区域只出一张图，区域内的其余块在 build_reading_cards 里已经跳过。
     不再需要「按垂直间距把相邻公式粘起来」那种补丁式逻辑——聚类已经把
     「同一处公式的上下游碎片」合并好了。表格段落同理，范围取整张表的外接矩形。
+
+    runin_heads（默认 None）：「行内小标题」补丁的开关。
+    传入 GROBID 候选标题列表时，**正文段落**若以某条候选开头，就拆成
+    ("heading", 标题) + ("text", 剩余正文) 两段——这类标题以句点结尾、与后文同段，
+    字号与正文一样，字号规则抓不到（详见 utils/runin_headings.py）。
+    只为「正文」段落做拆分：公式与表格走截图、有自己的渲染分支，不受影响；
+    章节标题本来就是 heading，也不动。**None = 完全旧行为**（回退开关）。
     """
     segments = []
     for kind, paragraph in buffer:
@@ -1603,13 +1611,19 @@ def _build_segments(buffer):
         elif kind == "heading":
             segments.append(("heading", text))
         else:
-            segments.append(("text", text))
+            split = runin_headings.split_runin(text, runin_heads) if runin_heads else None
+            if split:
+                head, rest = split
+                segments.append(("heading", head))
+                segments.append(("text", rest))
+            else:
+                segments.append(("text", text))
     return segments
 
 
-def _append_to_card(card, buffer, dehyphenate: bool = True):
+def _append_to_card(card, buffer, dehyphenate: bool = True, runin_heads=None):
     """把缓冲里的内容并进已有卡片（用于收掉章节末尾的零头，避免出现过短的尾卡）"""
-    card.segments.extend(_build_segments(buffer))
+    card.segments.extend(_build_segments(buffer, runin_heads))
     for kind, paragraph in buffer:
         if kind == "heading" and paragraph.text.strip():
             card.headings_inside.append(parse_section(paragraph.text.strip()))
@@ -1620,7 +1634,8 @@ def _append_to_card(card, buffer, dehyphenate: bool = True):
     card.y1 = max(card.y1, max(p.y1 for _, p in buffer))
 
 
-def _make_card(buffer, section_number: str, section_title: str, dehyphenate: bool = True):
+def _make_card(buffer, section_number: str, section_title: str, dehyphenate: bool = True,
+               runin_heads=None):
     """
     把缓冲里的段落合成一张阅读卡片。
 
@@ -1628,6 +1643,9 @@ def _make_card(buffer, section_number: str, section_title: str, dehyphenate: boo
     "formula" 公式区域。卡片的 text 是**纯文字**拼平后的全文（翻译、词数统计用），
     公式的线性文本不入内——它已经由公式图片承载，混进来只会污染翻译与计数。
     segments 保留内部结构，界面据此加粗标题、把公式渲染成图。
+
+    runin_heads 只影响 segments（见 _build_segments）：卡片的 text、页范围、
+    词数等一律按原样算，所以打开补丁**不会**改变卡片数量、词数与聚合结果。
     """
     items = [paragraph for _, paragraph in buffer]
     texts = _text_entries(buffer)
@@ -1635,7 +1653,7 @@ def _make_card(buffer, section_number: str, section_title: str, dehyphenate: boo
     total_chars = sum(len(p.text) for p in texts) or 1
     weighted_bold = sum(p.bold_ratio * len(p.text) for p in texts) / total_chars
 
-    segments = _build_segments(buffer)
+    segments = _build_segments(buffer, runin_heads)
     headings_inside = [parse_section(p.text.strip()) for kind, p in buffer
                        if kind == "heading" and p.text.strip()]
 
@@ -1661,7 +1679,8 @@ def _make_card(buffer, section_number: str, section_title: str, dehyphenate: boo
     )
 
 
-def build_reading_cards(paragraphs, target_words: int = 400, dehyphenate: bool = True):
+def build_reading_cards(paragraphs, target_words: int = 400, dehyphenate: bool = True,
+                        runin_heads=None):
     """
     把段落聚合成「阅读卡片」。
 
@@ -1673,6 +1692,12 @@ def build_reading_cards(paragraphs, target_words: int = 400, dehyphenate: bool =
       · 卡片不跨「非正文」区域（页眉页脚、参考文献等会被跳过）
       · 公式区域整块出图（一个区域只出一张图），**不计入词数、不进翻译**
       · 末尾零头能并进上一张就并；单个超长段落先按句子边界切开
+
+    runin_heads（默认 None）：「行内小标题补丁」的开关，传入 GROBID 候选标题列表时才生效。
+    它**只**作用于卡片内部的段落视图（segments）：命中的正文段被拆成
+    ("heading", 标题) + ("text", 剩余正文)。聚合、卡片数、卡片 text、词数全部照旧由
+    同一份段落文本算出（不走 segments），所以打开开关不会改变卡片切分、词数与文本——
+    这正是「默认关掉 = 与改动前逐字段一致」的依据（见 tests/regression_check.py 的基线比对）。
     """
     # 「目标词数」是攒到多少就收一张卡的阈值（默认 200），
     # 实际落点区间是它的 0.5~1.5 倍（默认 100~300 词）。
@@ -1724,9 +1749,10 @@ def build_reading_cards(paragraphs, target_words: int = 400, dehyphenate: bool =
         )
 
         if can_merge:
-            _append_to_card(previous, buffer, dehyphenate)
+            _append_to_card(previous, buffer, dehyphenate, runin_heads)
         else:
-            cards.append(_make_card(buffer, buffer_section[0], buffer_section[1], dehyphenate))
+            cards.append(_make_card(buffer, buffer_section[0], buffer_section[1],
+                                    dehyphenate, runin_heads))
 
         buffer = []
 
@@ -1799,7 +1825,7 @@ def build_reading_cards(paragraphs, target_words: int = 400, dehyphenate: bool =
 # ============================================================
 
 def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
-              target_words: int = 400, table_mode: str = "image") -> dict:
+              target_words: int = 400, table_mode: str = "image", runin_heads=None) -> dict:
     """
     PDF 字节流 → 阅读数据。
 
@@ -1820,6 +1846,11 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
         "image"（默认）表格识别出来、整区域截图呈现，文字移出卡片流；
         "text"         不做表格识别，表格文字照旧线性留在卡片流里
                        —— 这条路必须与 4.4-B 之前**逐字节一致**，是回退开关。
+
+    runin_heads：行内小标题补丁的候选标题（GROBID 抓的 <head>，已过滤），默认 None。
+        None = 完全旧行为（回退开关）；传入列表时，卡片内部的正文段若以某条候选标题
+        开头，会被拆成「加粗标题 + 正文」两段呈现。**只改卡片段落视图**：
+        原子块、段落文本、卡片文本与词数一律不变（理由见 build_reading_cards）。
     """
     start = time.time()
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
@@ -1916,7 +1947,7 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
         sync_paragraph_tables(blocks, paragraphs, table_regions)
 
         # ---- 七、卡片：正文按章节聚合，公式 / 表格区域整块出图 ----
-        cards = build_reading_cards(paragraphs, target_words, dehyphenate)
+        cards = build_reading_cards(paragraphs, target_words, dehyphenate, runin_heads)
 
         for idx, card in enumerate(cards, 1):
             card.card_index = idx

@@ -194,7 +194,8 @@ class Handler(BaseHTTPRequestHandler):
                           dehyphenate=settings.get("dehyphenate_on", True),
                           target_words=settings.get("target_words", 200),
                           table_mode=settings.get("table_mode", "image"),
-                          show_all=settings.get("show_all", False))
+                          show_all=settings.get("show_all", False),
+                          runin_patch=settings.get("runin_patch", False))
         data["backend"] = current_backend()
         data["elapsed_total"] = round(time.time() - started, 2)
         print(f"  重新解析：{STATE.file_name} · 卡片 {len(data.get('cards') or [])} 张 · "
@@ -247,6 +248,7 @@ class Handler(BaseHTTPRequestHandler):
             "target_words": number("words", 200),
             "table_mode_label": (query.get("table") or ["截图（推荐）"])[0],
             "show_all": flag("show_all", False),
+            "runin_patch": flag("runin", False),
         })
 
     def _api_open(self):
@@ -262,7 +264,8 @@ class Handler(BaseHTTPRequestHandler):
                           dehyphenate=settings["dehyphenate_on"],
                           target_words=settings["target_words"],
                           table_mode=settings["table_mode"],
-                          show_all=settings["show_all"])
+                          show_all=settings["show_all"],
+                          runin_patch=settings["runin_patch"])
         if not data.get("ok"):
             return self._send_json(data, code=200)      # 解析失败也要让前端显示原因
         data["backend"] = current_backend()

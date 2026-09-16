@@ -3,10 +3,12 @@ GROBID 客户端（阶段 4.3）
 ================================================================
 本模块【不依赖 Streamlit】，可以脱离网页单独运行、单独测试。
 
-它只做三件事：
-    1. is_alive()        探测本地 GROBID 服务在不在（不在就安静降级，不报错）
-    2. process_header()  把 PDF 字节流发给 GROBID 的 /api/processHeaderDocument，取回 TEI
+它只做四件事：
+    1. is_alive()         探测本地 GROBID 服务在不在（不在就安静降级，不报错）
+    2. process_header()   把 PDF 字节流发给 GROBID 的 /api/processHeaderDocument，取回 TEI
     3. parse_tei_header() 把 TEI XML 解析成结构化字段（**纯函数**，可离线测试）
+    4. parse_tei_heads()  从 TEI 里取出章节标题 <head>（同样是纯函数）——
+                          给「小标题补丁」用，过滤规则见 utils/runin_headings.py
 
 为什么要有它：
     阶段 4.1 / 4.2 的标题、作者、单位、摘要都是「本地规则 + 版面启发式」拼出来的，
@@ -305,6 +307,84 @@ def header_from_pdf(pdf_bytes: bytes, base_url: str = DEFAULT_BASE_URL,
     tei = process_header(pdf_bytes, base_url=base_url, timeout=timeout,
                          consolidate=consolidate, filename=filename)
     return parse_tei_header(tei)
+
+
+# ------------------------------------------------------------
+# 全文 TEI 里的章节标题 <head>（小标题补丁用）
+# ------------------------------------------------------------
+
+def parse_tei_heads(xml) -> list:
+    """
+    从 TEI 里取出所有 <head> 的文本（章节标题），按出现顺序返回、去重。
+
+    **纯函数**，命名空间无关（沿用本模块的 _tag/_text 防御式解析）。
+
+    关键的一条：**跳过祖先为 <figure> 的 <head>**。
+    GROBID 把图注写成 `<figure><head>Fig. 1 | …</head>…</figure>`，
+    结构上把它排除掉，就干掉了绝大多数噪音（实测 Nature 那篇的 8 条图注一次清空），
+    而且不依赖任何字符串前缀规则——图注换一种写法（`. 1 |`）也照样排除。
+
+    解析失败抛 GrobidError（与 parse_tei_header 一致，消息可直接展示给用户）。
+    """
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError as exc:
+        raise GrobidError(f"GROBID 返回的不是合法 XML（{exc}）。"
+                          "多半是服务端出错或返回了错误页，请查看容器日志。")
+    return _tei_heads_in_order(root)
+
+
+def _tei_heads_in_order(element, seen=None) -> list:
+    """
+    按文档顺序（深度优先前序）收集 <head> 文本；**<figure> 整棵子树直接跳过**。
+
+    为什么要递归而不是 root.iter("head")：ElementTree 的节点没有父指针，
+    用 iter() 拿到的 head 无法判断它在不在 <figure> 里；顺着树走一遍则天然知道。
+    """
+    if seen is None:
+        seen = set()
+    out = []
+    for child in list(element):
+        if _tag(child) == "figure":
+            continue
+        if _tag(child) == "head":
+            text = _text(child)
+            if text and text not in seen:
+                seen.add(text)
+                out.append(text)
+        out.extend(_tei_heads_in_order(child, seen))
+    return out
+
+
+def heads_from_pdf(pdf_bytes: bytes, base_url: str = DEFAULT_BASE_URL,
+                   timeout: float = DEFAULT_TIMEOUT, filename: str = "input.pdf") -> list:
+    """
+    调 /api/processFulltextDocument（全文解析），返回 parse_tei_heads 的结果。
+
+    与服务探测的关系：**不在这个函数里再探一次**服务——调用方（webapp.state.run_grobid）
+    已经先用 is_alive() 探过，这里直接发请求；服务没起来时 requests 会抛 ConnectionError，
+    照样被翻译成同一条中文 GrobidError，界面安静降级即可。
+
+    注意：全文解析比头部抽取慢（CRF 版实测 5~20 秒），所以超时沿用 60 秒，
+    并且**只**用于「小标题补丁」这一个用途——不拿它替换现有的任何结果。
+    """
+    url = base_url.rstrip("/") + "/api/processFulltextDocument"
+    files = {"input": (filename, pdf_bytes, "application/pdf")}
+    try:
+        response = requests.post(url, files=files, timeout=timeout)
+    except requests.exceptions.ConnectionError:
+        raise GrobidError(f"连不上 GROBID 服务（{base_url}）：请确认容器在运行"
+                          "（docker run --rm --init -p 8070:8070 grobid/grobid:0.9.1-crf）。")
+    except requests.exceptions.Timeout:
+        raise GrobidError(f"GROBID 全文解析超时（>{timeout:.0f} 秒）。"
+                          "首次调用要加载模型，可稍后重试；大文件也可能偏慢。")
+    except Exception as exc:
+        raise GrobidError(f"调用 GROBID 失败：{type(exc).__name__}: {exc}")
+
+    if response.status_code != 200:
+        detail = re.sub(r"\s+", " ", response.text or "")[:200]
+        raise GrobidError(f"GROBID 返回 HTTP {response.status_code}：{detail}")
+    return parse_tei_heads(response.content)
 
 
 def summarize(parsed: dict) -> str:

@@ -16,7 +16,7 @@ import os
 import threading
 
 from utils import grobid_client, image_extractor, metadata as metadata_module, pdf_parser, store
-from utils import translate_plan
+from utils import runin_headings, translate_plan
 
 from . import payload as payload_module
 
@@ -41,15 +41,23 @@ class PaperState:
         self.position = 0
         self.cache_hit = False
         self.error = None
+        self.runin_heads = []      # 本次解析真正用上的「行内小标题」候选（补丁关掉时为空）
+        self.grobid_heads = []     # 最近一次 GROBID 校验抓到的候选标题（会随记录落盘）
 
     # ---------------- 打开一篇文献 ----------------
     def open(self, pdf_bytes: bytes, file_name: str, merge_on=True, dehyphenate=True,
-             target_words=200, table_mode="image", show_all=False) -> dict:
+             target_words=200, table_mode="image", show_all=False,
+             runin_patch=False, runin_heads=None) -> dict:
         """
         解析（或命中缓存）并返回给前端的 JSON（不含 registry）。
 
-        解析设置（合并/连字符/目标词数/表格呈现/显示全部）由前端传进来，并**按 Streamlit 版
-        同名字段写进记录**——两个前端共用 `.cache/`，换前端时设置不会突然变。
+        解析设置（合并/连字符/目标词数/表格呈现/显示全部/小标题补丁）由前端传进来，
+        并**按 Streamlit 版同名字段写进记录**——两个前端共用 `.cache/`，换前端时设置不会突然变。
+
+        runin_patch：是否启用「行内小标题补丁」（默认关，等于旧行为）。
+        runin_heads：显式指定候选标题；为 None 时按「开关开着 + 记录里有 grobid_heads」
+            自动取用记录里的那批（它们是 run_grobid() 抓取并过滤后存下来的）。
+            候选标题只用于拆卡片内部的段落视图，**不改**卡片切分与词数。
         """
         with self._lock:
             self.reset()
@@ -57,13 +65,24 @@ class PaperState:
             self.file_name = file_name
             self.settings = payload_module.settings_payload({
                 "merge_on": merge_on, "dehyphenate_on": dehyphenate,
-                "target_words": target_words, "table_mode": table_mode, "show_all": show_all})
+                "target_words": target_words, "table_mode": table_mode, "show_all": show_all,
+                "runin_patch": runin_patch})
             self.key, record = store.load_paper_for(pdf_bytes)
             self.cache_hit = record is not None
 
+            # 「小标题补丁」的候选来自记录（run_grobid 写入的 grobid_heads）：
+            # 只有本次设置把开关打开时才真正生效——关掉就是与改动前完全一致的旧行为。
+            resolved = runin_heads
+            if resolved is None and self.settings.get("runin_patch") and record:
+                stored = record.get("grobid_heads")
+                if isinstance(stored, (list, tuple)):
+                    resolved = [str(item) for item in stored if str(item).strip()]
+            self.runin_heads = list(resolved) if resolved else []
+
             try:
                 self.parse_result = pdf_parser.parse_pdf(
-                    pdf_bytes, merge_on, dehyphenate, target_words, table_mode)
+                    pdf_bytes, merge_on, dehyphenate, target_words, table_mode,
+                    runin_heads=self.runin_heads or None)
                 self.image_result = image_extractor.extract_images(pdf_bytes)
                 # ⚠️ 必须再做一次「图片 ↔ 卡片」关联：extract_images 只负责把图片抠出来，
                 # 是 associate_with_cards 给每张图写上 card_order，前端才能把插图放到对应卡片后面
@@ -246,6 +265,12 @@ class PaperState:
         调 GROBID 抽头部信息，并与本地规则逐字段对照。
 
         结果存进论文记录（`grobid` 字段，与 Streamlit 版同名字段）→ 下次打开不必重跑（省 5~10 秒）。
+
+        顺带做第二件事（阶段 4.5「小标题补丁」）：再发一次全文解析
+        （/api/processFulltextDocument），把 TEI 里的章节标题 <head> 取出来、按
+        utils.runin_headings 的规则过滤，存进记录的新字段 `grobid_heads`。
+        它是**候选**而不是结果——要不要用由左栏「用小标题补丁」那个开关决定。
+        这一步失败（超时/服务抖动/PDF 解析不了）只记为空列表，**不影响**上面的字段对照。
         """
         from utils import metadata_compare
 
@@ -264,13 +289,29 @@ class PaperState:
             except Exception as exc:                       # 兜底：任何异常都不能打断阅读
                 return {"ok": False, "error": f"{type(exc).__name__}: {exc}",
                         "rows": [], "alive": True}
+
+            # ---- 第二意见之二：全文 TEI 的 <head> → 过滤 → 小标题候选 ----
+            heads, heads_note = [], ""
+            try:
+                raw_heads = grobid_client.heads_from_pdf(
+                    self.pdf_bytes, base_url=status["url"], filename=self.file_name)
+                heads = runin_headings.filter_runin_heads(raw_heads)
+                heads_note = f"原始 head {len(raw_heads)} 条 → 过滤后 {len(heads)} 条"
+            except grobid_client.GrobidError as exc:
+                heads_note = f"小标题候选未取到：{exc}"
+            except Exception as exc:                       # 兜底：不让它影响字段对照
+                heads_note = f"小标题候选未取到：{type(exc).__name__}: {exc}"
+
             self.grobid_result = result
+            self.grobid_heads = heads
             record = dict(store.load_paper(self.key) or {})
             record["grobid"] = result
+            record["grobid_heads"] = heads
             store.save_paper(record)
             rows = metadata_compare.build_comparison(self.metadata, result)
             return {"ok": True, "error": None, "alive": True,
                     "summary": grobid_client.summarize(result),
+                    "runin_heads": heads, "runin_count": len(heads), "runin_note": heads_note,
                     "rows": payload_module.comparison_payload(rows)}
 
     def apply_grobid(self, store_key: str, value: str, is_list: bool = False) -> dict:

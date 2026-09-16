@@ -34,6 +34,8 @@ function readSettings() {
     merge_on: $('set-merge').checked,
     dehyphenate_on: $('set-dehyphenate').checked,
     show_all: $('set-showall').checked,
+    // 小标题补丁：用 GROBID 抓的行内小标题拆卡片段落（候选来自记录里的 grobid_heads）
+    runin_patch: $('set-runin').checked,
     target_words: Number($('set-words').value || 200),
     table_mode_label: document.querySelector('#table-seg button.on')?.dataset.table || '截图（推荐）',
   };
@@ -44,6 +46,7 @@ function applySettings(settings) {
   $('set-merge').checked = s.merge_on !== false;
   $('set-dehyphenate').checked = s.dehyphenate_on !== false;
   $('set-showall').checked = !!s.show_all;
+  $('set-runin').checked = !!s.runin_patch;
   $('set-words').value = s.target_words || 200;
   $('set-words-label').textContent = $('set-words').value;
   const label = s.table_mode_label || '截图（推荐）';
@@ -55,7 +58,7 @@ function settingsQuery() {
   const s = readSettings();
   return '?merge=' + (s.merge_on ? 1 : 0) + '&dehyphenate=' + (s.dehyphenate_on ? 1 : 0)
     + '&words=' + s.target_words + '&table=' + encodeURIComponent(s.table_mode_label)
-    + '&show_all=' + (s.show_all ? 1 : 0);
+    + '&show_all=' + (s.show_all ? 1 : 0) + '&runin=' + (s.runin_patch ? 1 : 0);
 }
 
 function savePrefs() {
@@ -427,7 +430,13 @@ async function runGrobid() {
       $('grobid-rows').innerHTML = '';
       return;
     }
-    $('grobid-status').innerHTML = '✅ ' + esc(result.summary || '已完成');
+    // 小标题补丁：GROBID 顺手抓的那批「行内小标题候选」也一并报出来，
+    // 让用户知道下一步该做什么（勾左栏开关 + 重新解析），而不是猜为什么没变化
+    const count = (result.runin_heads || []).length;
+    const runin = count
+      ? `<br>📑 已记录 ${count} 条 GROBID 小标题候选；勾选左栏「用小标题补丁」并重新解析即可生效。`
+      : '<br>📑 本次没有可用的 GROBID 小标题候选（图注/表注与整句正文都已被过滤掉）。';
+    $('grobid-status').innerHTML = '✅ ' + esc(result.summary || '已完成') + runin;
     renderGrobidRows(result.rows || []);
   } catch (err) {
     alert('GROBID 调用失败：' + err.message);
@@ -517,7 +526,10 @@ async function reparse() {
     renderAll();
     $('settings-note').textContent = `已按新设置重新解析：${data.overview.cards} 张卡片 · `
       + `公式区域 ${data.overview.formula_regions} 个 · 表格区域 ${data.overview.table_regions} 个`
-      + (settings.show_all ? '（显示全部内容：核对模式，保持原文不翻译）' : '');
+      + (settings.show_all ? '（显示全部内容：核对模式，保持原文不翻译）' : '')
+      // 补丁的候选存在记录里、由「运行 GROBID 校验」写入，所以在没跑过校验前勾它不会有变化
+      + (settings.runin_patch
+        ? '（已启用小标题补丁：候选来自上一次「运行 GROBID 校验」，没跑过就没有候选）' : '');
   } catch (err) {
     alert('重新解析失败：' + err.message);
   } finally {
