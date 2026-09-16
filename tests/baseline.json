@@ -1,7 +1,7 @@
 {
-  "采集时间": "2026-09-16 13:02:32",
+  "采集时间": "2026-09-16 23:18:08",
   "样本目录": "E:\\segemented pdf reader\\测试pdf",
-  "样本数": 10,
+  "样本数": 12,
   "表格模式": "image",
   "样本": {
     "1-s2.0-S0960982215012476-main.pdf": {
@@ -75,7 +75,8 @@
       "卡片词数最大": 537,
       "角色分布": {
         "author": 4,
-        "body": 159,
+        "body": 149,
+        "caption": 10,
         "copyright": 5,
         "front_matter": 2,
         "header_footer": 21,
@@ -114,7 +115,7 @@
         ]
       },
       "_允许变化": {
-        "解析耗时": 0.31,
+        "解析耗时": 0.3,
         "元数据来源": {
           "标题": "字号分析（25.9pt，第 1 页）",
           "DOI": "第 1 页超链接",
@@ -170,7 +171,7 @@
         ]
       },
       "_允许变化": {
-        "解析耗时": 0.13,
+        "解析耗时": 0.12,
         "元数据来源": {
           "标题": "字号分析（13.4pt，第 1 页）",
           "DOI": "第 1 页超链接",
@@ -227,7 +228,7 @@
         ]
       },
       "_允许变化": {
-        "解析耗时": 0.27,
+        "解析耗时": 0.28,
         "元数据来源": {
           "标题": "字号分析（18.0pt，第 1 页）",
           "DOI": "前两页交叉验证（第 1、1 页都出现）",
@@ -289,7 +290,7 @@
         "附件链接": []
       },
       "_允许变化": {
-        "解析耗时": 1.62,
+        "解析耗时": 1.6,
         "元数据来源": {
           "标题": "字号分析（17.2pt，第 1 页）",
           "DOI": "第 1 页超链接",
@@ -350,7 +351,7 @@
         ]
       },
       "_允许变化": {
-        "解析耗时": 0.23,
+        "解析耗时": 0.22,
         "元数据来源": {
           "标题": "字号分析（20.9pt，第 1 页）",
           "DOI": "第 1 页超链接",
@@ -371,7 +372,8 @@
       "卡片词数最大": 371,
       "角色分布": {
         "author": 3,
-        "body": 699,
+        "body": 682,
+        "caption": 17,
         "copyright": 3,
         "front_matter": 1,
         "header_footer": 82,
@@ -461,7 +463,7 @@
         "附件链接": []
       },
       "_允许变化": {
-        "解析耗时": 0.16,
+        "解析耗时": 0.17,
         "元数据来源": {
           "标题": "字号分析（16.0pt，第 1 页）",
           "DOI": "第 1 页超链接",
@@ -511,7 +513,7 @@
         "附件链接": []
       },
       "_允许变化": {
-        "解析耗时": 0.62,
+        "解析耗时": 0.59,
         "元数据来源": {
           "标题": "字号分析（14.3pt，第 1 页）",
           "DOI": "第 1 页超链接",
@@ -576,12 +578,72 @@
         "附件链接": []
       },
       "_允许变化": {
-        "解析耗时": 2.26,
+        "解析耗时": 2.16,
         "元数据来源": {
           "标题": "字号分析（17.2pt，第 1 页）",
           "DOI": "第 1 页超链接",
           "通讯作者": "未找到",
           "附件链接": "未找到"
+        }
+      }
+    },
+    "s41562-025-02379-z.pdf": {
+      "文件": "s41562-025-02379-z.pdf",
+      "页数": 23,
+      "原子块数": 556,
+      "段落数": 515,
+      "卡片数": 63,
+      "正文总词数": 14859,
+      "卡片词数中位": 212,
+      "卡片词数最小": 106,
+      "卡片词数最大": 734,
+      "角色分布": {
+        "author": 4,
+        "body": 424,
+        "caption": 8,
+        "copyright": 4,
+        "front_matter": 1,
+        "header_footer": 72,
+        "heading": 38,
+        "label": 1,
+        "reference": 4
+      },
+      "公式区域数": 0,
+      "公式图片段落数": 0,
+      "表格区域数": 0,
+      "表格图片段落数": 0,
+      "元数据": {
+        "标题": "Spatial contexts with reliable neural representations support reinstatement of subsequently placed objects",
+        "DOI": "10.1038/s41562-025-02379-z",
+        "摘要词数": 225,
+        "作者列表": [
+          "Rolando Masís-Obando 1",
+          "Kenneth A. Norman",
+          "Christopher Baldassano"
+        ],
+        "第一作者": "Rolando Masís-Obando 1",
+        "通讯作者": "",
+        "通讯邮箱": "rmasis@princeton.edu",
+        "作者单位": [
+          "¹ Princeton Neuroscience Institute, Princeton University, Princeton, NJ, USA",
+          "² Psychological and Brain Sciences, Johns Hopkins University, Baltimore, MD, USA",
+          "³ Department of Psychology, Princeton University, Princeton, NJ, USA",
+          "⁴ Department of Psychology, Columbia University, New York, NY, USA"
+        ],
+        "作者邮箱": [],
+        "附件链接": [
+          "https://openneuro.org/datasets/ds005704",
+          "https://github.com/rmasiso/MemoryPalaceReliability",
+          "https://doi.org/10.5281/zenodo.581704"
+        ]
+      },
+      "_允许变化": {
+        "解析耗时": 0.65,
+        "元数据来源": {
+          "标题": "字号分析（26.0pt，第 1 页）",
+          "DOI": "第 1 页超链接",
+          "通讯作者": "未找到",
+          "附件链接": "全页扫描链接注释与正文 URL（3 条）"
         }
       }
     }

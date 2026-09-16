@@ -36,6 +36,8 @@ function readSettings() {
     show_all: $('set-showall').checked,
     // 小标题补丁：用 GROBID 抓的行内小标题拆卡片段落（候选来自记录里的 grobid_heads）
     runin_patch: $('set-runin').checked,
+    // 图区域截图（阶段 4.6）：矢量图页整块截图、图内小字移出正文（默认关）
+    figure_region: $('set-figure').checked,
     target_words: Number($('set-words').value || 200),
     table_mode_label: document.querySelector('#table-seg button.on')?.dataset.table || '截图（推荐）',
   };
@@ -47,6 +49,7 @@ function applySettings(settings) {
   $('set-dehyphenate').checked = s.dehyphenate_on !== false;
   $('set-showall').checked = !!s.show_all;
   $('set-runin').checked = !!s.runin_patch;
+  $('set-figure').checked = !!s.figure_region;
   $('set-words').value = s.target_words || 200;
   $('set-words-label').textContent = $('set-words').value;
   const label = s.table_mode_label || '截图（推荐）';
@@ -58,7 +61,8 @@ function settingsQuery() {
   const s = readSettings();
   return '?merge=' + (s.merge_on ? 1 : 0) + '&dehyphenate=' + (s.dehyphenate_on ? 1 : 0)
     + '&words=' + s.target_words + '&table=' + encodeURIComponent(s.table_mode_label)
-    + '&show_all=' + (s.show_all ? 1 : 0) + '&runin=' + (s.runin_patch ? 1 : 0);
+    + '&show_all=' + (s.show_all ? 1 : 0) + '&runin=' + (s.runin_patch ? 1 : 0)
+    + '&fig=' + (s.figure_region ? 1 : 0);
 }
 
 function savePrefs() {
@@ -163,8 +167,9 @@ async function ensureTranslations(card) {
 /* ---------------- 渲染 ---------------- */
 function figureHTML(seg) {
   // 图片用 id 引用，PNG 由 /api/img/<id> 提供；点击换成 size=full 看原尺寸
-  const caption = seg.kind === 'figure' ? (seg.meta || '')
-    : (seg.kind === 'table' ? '表格区域 · ' + (seg.meta || '') : '公式区域 · ' + (seg.meta || ''));
+  const label = { figure: '', table: '表格区域 · ', formula: '公式区域 · ',
+    figure_region: '图区域 · ' }[seg.kind] || '区域 · ';
+  const caption = (seg.kind === 'figure' ? (seg.meta || '') : label + (seg.meta || ''));
   return `<figure><img alt="${esc(caption)}" src="/api/img/${encodeURIComponent(seg.id)}?size=thumb"
       data-id="${esc(seg.id)}" data-full="/api/img/${encodeURIComponent(seg.id)}?size=full">`
     + `<figcaption>${esc(caption)}<span class="zoom">点击放大</span></figcaption></figure>`;
@@ -478,6 +483,19 @@ async function takeGrobid(button) {
 }
 
 /* 解析诊断：把"解析过程发生了什么"如实列出来，便于核对"有没有误杀/漏检" */
+function figureDiagLine(d) {
+  // 图区域（阶段 4.6）：开关关着时没有探测数字，如实说明；开着时给出定位/失败条数
+  const stats = d.figure_stats || {};
+  if (!stats.caption_page_count && !(d.figure_regions || []).length) {
+    return (state.paper && state.paper.settings && state.paper.settings.figure_region)
+      ? '本页无图注（未探测到矢量图页）' : '未启用（左栏「解析设置」可打开）';
+  }
+  const failed = (d.figure_failures || []).length;
+  return `本篇 ${stats.caption_pages_no_bitmap_count || 0} 个图注页无面板级位图 · `
+    + `过闸门 ${stats.gate_page_count || 0} 页 · 定位成功 ${(d.figure_regions || []).length} 个`
+    + (failed ? ` · 定位失败 ${failed} 个` : '');
+}
+
 async function renderDiagnostics() {
   if (!state.paper) { $('diag-body').innerHTML = ''; return; }
   try {
@@ -490,6 +508,7 @@ async function renderDiagnostics() {
       ['正文字号基准', d.body_size + ' pt'], ['解析耗时', d.elapsed + ' 秒'],
       ['公式区域 / 表格区域', `${(d.formula_regions || []).length} / ${(d.table_regions || []).length}`],
       ['插图 / 跳过', `${(d.images || []).length} / ${(d.skipped_images || []).length}`],
+      ['图区域（矢量图页）', figureDiagLine(d)],
     ].map(([k, v]) => `<div class="kv"><span>${esc(k)}</span><span>${esc(v)}</span></div>`).join('');
     const pages = (d.pages || []).map((p) => `第${p.page}页 ${p.layout}`).join(' · ');
     const regions = (d.formula_regions || []).slice(0, 12).map((r) =>
@@ -499,10 +518,17 @@ async function renderDiagnostics() {
     const imgs = (d.images || []).slice(0, 10).map((m) =>
       `<li>第 ${m.page} 页 · ${esc(m.pixels)} px · ${esc(m.display)} · `
       + `${m.card ? '关联卡片 #' + esc(m.card) : '未关联卡片'}</li>`).join('');
+    const figs = (d.figure_regions || []).slice(0, 8).map((r) =>
+      `<li>第 ${r.page} 页 · ${r.members} 块图内小字 · ${esc(r.source || '')} · ${esc(r.caption || '')}</li>`)
+      .join('');
+    const figFails = (d.figure_failures || []).slice(0, 8).map((f) =>
+      `<li>第 ${f.page} 页 · ${esc(f.reason || '')} · ${esc(f.caption || '')}（已放弃截图）</li>`).join('');
     $('diag-body').innerHTML = kv
       + `<div class="cache" style="margin-top:6px">排版：${esc(pages)}</div>`
       + (regions ? `<div class="cache"><b>公式区域</b><ul class="diag">${regions}</ul></div>` : '')
       + (tables ? `<div class="cache"><b>表格区域</b><ul class="diag">${tables}</ul></div>` : '')
+      + (figs ? `<div class="cache"><b>图区域</b><ul class="diag">${figs}</ul></div>` : '')
+      + (figFails ? `<div class="cache"><b>图区域定位失败</b><ul class="diag">${figFails}</ul></div>` : '')
       + (imgs ? `<div class="cache"><b>插图</b><ul class="diag">${imgs}</ul></div>` : '');
     $('diag-note').textContent = '这些数字来自本次解析；用它核对"有没有误杀真正文 / 漏掉公式表格"。';
   } catch (e) { /* 诊断拿不到不影响阅读 */ }
@@ -529,7 +555,9 @@ async function reparse() {
       + (settings.show_all ? '（显示全部内容：核对模式，保持原文不翻译）' : '')
       // 补丁的候选存在记录里、由「运行 GROBID 校验」写入，所以在没跑过校验前勾它不会有变化
       + (settings.runin_patch
-        ? '（已启用小标题补丁：候选来自上一次「运行 GROBID 校验」，没跑过就没有候选）' : '');
+        ? '（已启用小标题补丁：候选来自上一次「运行 GROBID 校验」，没跑过就没有候选）' : '')
+      + (settings.figure_region
+        ? `（已启用图区域截图：${data.overview.figure_regions || 0} 个图区域，图内小字已移出正文）` : '');
   } catch (err) {
     alert('重新解析失败：' + err.message);
   } finally {

@@ -195,7 +195,8 @@ class Handler(BaseHTTPRequestHandler):
                           target_words=settings.get("target_words", 200),
                           table_mode=settings.get("table_mode", "image"),
                           show_all=settings.get("show_all", False),
-                          runin_patch=settings.get("runin_patch", False))
+                          runin_patch=settings.get("runin_patch", False),
+                          figure_region=settings.get("figure_region", False))
         data["backend"] = current_backend()
         data["elapsed_total"] = round(time.time() - started, 2)
         print(f"  重新解析：{STATE.file_name} · 卡片 {len(data.get('cards') or [])} 张 · "
@@ -249,6 +250,7 @@ class Handler(BaseHTTPRequestHandler):
             "table_mode_label": (query.get("table") or ["截图（推荐）"])[0],
             "show_all": flag("show_all", False),
             "runin_patch": flag("runin", False),
+            "figure_region": flag("fig", False),
         })
 
     def _api_open(self):
@@ -265,7 +267,8 @@ class Handler(BaseHTTPRequestHandler):
                           target_words=settings["target_words"],
                           table_mode=settings["table_mode"],
                           show_all=settings["show_all"],
-                          runin_patch=settings["runin_patch"])
+                          runin_patch=settings["runin_patch"],
+                          figure_region=settings["figure_region"])
         if not data.get("ok"):
             return self._send_json(data, code=200)      # 解析失败也要让前端显示原因
         data["backend"] = current_backend()

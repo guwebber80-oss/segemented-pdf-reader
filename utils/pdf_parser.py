@@ -33,6 +33,7 @@ from dataclasses import dataclass, field, fields, replace
 
 import pymupdf      # PDF 解析核心（PyMuPDF；新版推荐 import pymupdf，旧的 fitz 已弃用）
 
+from . import figure_finder   # 矢量图页的「图区域」定位（阶段 4.6，默认关闭）
 from . import formula_finder
 from . import runin_headings   # 行内小标题补丁（纯函数，只用于卡片段落视图，见 _build_segments）
 from . import table_finder   # 公式锚点表、三级判据、区域聚类（本模块依赖它，它不反向依赖本模块）
@@ -102,10 +103,37 @@ ROLE_NAMES = {
 # 留在阅读卡片里的角色（图注按用户要求视作正文）
 READING_ROLES = (ROLE_BODY, ROLE_CAPTION)
 
-# 图注：必须是 "Figure 3." / "Fig. 2:" 这种「编号 + 标点」形式。
+# 图注：必须是 "Figure 3." / "Fig. 2:" / "Fig. 1 | A resource-rational…" 这种
+# 「标签 + 编号 + 分隔符」形式。
 # 不能简单用 "Figure 4 illustrates…" 匹配——那是正文在引用图，不是图注。
+#
+# 分隔符必须是 `[:.、|｜]` 之一，**这一条就是「不误伤正文」的防线**：
+#   · "Fig. 2 suggests that…"      → 编号后面是空格，不匹配 ✓
+#   · "Figure 1 illustrates the…"  → 同上 ✓
+#   · "Fig. 1 | A resource-rational mechanism…" → 匹配 ✓
+# 竖线 `|` 是 Nature 系列（NHB 两篇）的题注分隔符：口径与
+# utils/table_finder.CAPTION_RE（`[.:|｜]`）对齐——早先这里只有 `[:.、]`，
+# 于是两篇 NHB「全书 role='caption' 的块数为 0」，7 条 Fig. 题注全被当正文塞进卡片
+# （实测旧 NHB 第 2/3/4 页的图内小字也是这样混进卡片的，见阶段 4.6 取证）。
+# 同时补上 "Extended Data Fig./Table"、"Supplementary Table"、"Supp. Fig." 这些前缀
+# （原文只认 "supplementary fig"，漏了 extended data 与 supplementary table）。
+_CAPTION_LABEL = (r"(?:extended\s+data\s+|supplementary\s+|supp\.?\s+)?"
+                  r"(?:fig(?:ure)?|tab(?:le)?|scheme|box|plate)")
+_CAPTION_NUMBER = r"(?:\d{1,3}|[IVX]{1,4})"      # 阿拉伯数字，或期刊的罗马数字 "Table I"
+_CAPTION_SEP = r"[:.、|｜]"
 _CAPTION_RE = re.compile(
-    r"^\s*(fig(?:ure)?|tab(?:le)?|scheme|box|supplementary\s+fig(?:ure)?)\s*\.?\s*\d+\s*[:.、]", re.I)
+    rf"^\s*{_CAPTION_LABEL}\s*\.?\s*{_CAPTION_NUMBER}\s*{_CAPTION_SEP}", re.I)
+
+
+def is_caption_text(text: str) -> bool:
+    """
+    这段文字是不是「图注/表注」抬头（纯形状判据，不含几何校验）。
+
+    提成函数是为了让图区域定位（utils/figure_finder）能复用**同一套口径**：
+    它按题注锚点定下界，用的判据必须与角色分类完全一致，否则会出现
+    「这一块被判成图注、却当不了锚点」这种自相矛盾的情况。
+    """
+    return bool(_CAPTION_RE.match(text or ""))
 
 # 版权 / 许可 / 资助声明
 _COPYRIGHT_RE = re.compile(
@@ -371,6 +399,24 @@ def apply_table_regions(blocks, regions) -> None:
         block.is_table = block.table_id >= 0
 
 
+def apply_figure_regions(blocks, regions) -> None:
+    """
+    把图区域写回原子块：区域覆盖到的块标上 figure_id 与 is_figure。
+
+    与表格/公式一样，is_figure 的语义只有一条——**属于某个已确认的图区域**。
+    被标上的块（图内小字）会**移出文字流**，改由区域截图承载（见 build_reading_cards）；
+    **题注块不在此列**：它留在卡片流里（项目规则：图注视作正文）。
+
+    顺序上这一步必须在**公式聚类之前**：图页天然产碎片（旧 NHB 第 2/3/4 页有
+    58 个 fragment/weak 块），不排除的话会在图里冒出一堆公式图。
+    """
+    for region in regions:
+        for index in region.atom_indices:
+            blocks[index].figure_id = region.region_id
+    for block in blocks:
+        block.is_figure = block.figure_id >= 0
+
+
 def repair_stats_symbols(text: str) -> str:
     """在统计量上下文里修回被字体错映射的希腊字母（ηp² / η²）"""
     for pattern, replacement in _STATS_SYMBOL_FIXES:
@@ -522,6 +568,12 @@ class Block:
     is_table: bool = False      # 是否属于某个已确认的表格区域（同样是截图呈现、移出文字流）
     table_id: int = -1          # 所属表格区域编号（-1 = 不属于任何表格区域）
     table_caption: str = ""     # 表格题注（界面在图下方标出来，便于核对）
+    is_figure: bool = False     # 是否属于某个已确认的图区域（阶段 4.6，截图呈现、移出文字流）
+    figure_id: int = -1         # 所属图区域编号（-1 = 不属于任何图区域）
+    figure_caption: str = ""    # 图区域的题注（界面上标出来，便于核对）
+    figure_head: dict = None    # 非 None = 这段是图区域的「头」，卡片里由它出区域截图
+                                #（与表格/公式不同：图区域的头**默认是题注段落**，
+                                #  这样"图在题注上方"的阅读顺序天然正确，见 sync_paragraph_figures）
     font_names: tuple = ()      # 块内出现的字体名（数学字体是公式的强证据）
     origin_baseline: float = 0.0  # 块内行的中位基线 y（上下标判定的基准）
 
@@ -1019,7 +1071,12 @@ def _should_merge(prev: Block, cur: Block) -> bool:
     """
     # 公式块不参与段落合并：否则拆出来的公式行又会被粘回散文里
     # 表格块同理：表格行一旦和上下文的散文粘在一起，就再也切不干净了
-    if prev.is_formula or cur.is_formula or prev.is_table or cur.is_table:
+    # 图内小字（图区域成员）同理，而且这里**必须**是硬墙：
+    # 它后面的块一旦并进同一段，那段就会被整段当成图区成员跳过、文字凭空消失
+    # （实测旧 NHB 第 4 页：一个 3 词的图内小字块把后面的 107 词正文粘了进来，
+    #   打开图区域后那 107 词从卡片里消失了 —— 正是必须杜绝的"内容丢失"）。
+    if prev.is_formula or cur.is_formula or prev.is_table or cur.is_table \
+            or prev.is_figure or cur.is_figure:
         return False
 
     if cur.page == prev.page + 1:
@@ -1072,11 +1129,12 @@ def build_paragraph_groups(blocks) -> list:
       · 已经带公式等级的块（强 / 弱 / 碎片）**各自单独成组**，
         否则碎片会被当成段落续写吞掉；
       · 属于表格区域的块也各自单独成组（表格要整块出图，不能与散文粘在一起）；
+      · 属于图区域的「图内小字」同理（阶段 4.6：整块出图 + 移出文字流）。
       · 其余按 _should_merge 的保守规则判断「后一块是不是前一块的续写」。
     """
     groups = []
     for index, block in enumerate(blocks):
-        if block.is_formula or block.formula_tier or block.is_table:
+        if block.is_formula or block.formula_tier or block.is_table or block.is_figure:
             groups.append([index])
             continue
         if groups and _should_merge(blocks[groups[-1][-1]], block):
@@ -1197,6 +1255,66 @@ def sync_paragraph_tables(blocks, paragraphs, regions) -> None:
             paragraph.x0, paragraph.y0, paragraph.x1, paragraph.y1 = region.rect
             paragraph.page = region.page
             paragraph.table_caption = region.caption
+
+
+def sync_paragraph_figures(blocks, paragraphs, regions) -> None:
+    """
+    把原子块的图区域状态同步到段落视图。
+
+    两件事：
+      · **成员段落**标上 is_figure / figure_id —— 它们在卡片构建里被跳过（不进文字流）；
+      · 给每个区域找一个「头段落」并挂上 region 载荷（paragraph.figure_head）：
+        卡片构建据此渲染这一张区域截图。
+        头的选取很关键：优先用**题注段落**（区域有成员时也一样）——
+        这样"图在题注上方"的阅读顺序天然正确，而且题注本来就在卡片里、一定渲染得出来；
+        只有题注段落本身进不了阅读流（角色被归到背景信息）时才退回「第一个成员段落」。
+        向量轮廓图（region.atom_indices 为空）没有成员，只能挂题注段落。
+    """
+    region_by_id = {region.region_id: region for region in regions}
+    anchor_regions, member_head = {}, {}
+    for region in regions:
+        anchor_regions.setdefault(region.anchor_index, []).append(region.region_id)
+        if region.atom_indices:
+            member_head.setdefault(region.atom_indices[0], region.region_id)
+
+    def readable(paragraph) -> bool:
+        return paragraph.role in READING_ROLES or paragraph.role == ROLE_HEADING
+
+    # 先算清楚：哪些区域的**题注段落**真的进得了阅读流？
+    # 只有进不了的才退回"第一个成员段落"当头（否则同一张图会在两张卡里各出一次：
+    # 题注出一次、成员头又出一次 —— 实测就是这样冒出 7 张图、实际只有 4 个区域）。
+    anchored = set()
+    for paragraph in paragraphs:
+        if not readable(paragraph):
+            continue
+        for index in paragraph.atom_indices:
+            anchored.update(anchor_regions.get(index, ()))
+
+    for paragraph in paragraphs:
+        head = blocks[paragraph.atom_indices[0]]
+        paragraph.is_figure = head.is_figure
+        paragraph.figure_id = head.figure_id
+        if paragraph.figure_id >= 0:
+            region = region_by_id.get(paragraph.figure_id)
+            if region is not None:
+                paragraph.figure_caption = region.caption
+
+    for paragraph in paragraphs:
+        region_id = None
+        if readable(paragraph):
+            for index in paragraph.atom_indices:
+                if index in anchor_regions:
+                    region_id = anchor_regions[index][0]
+                    break
+        first = paragraph.atom_indices[0]
+        if region_id is None and first in member_head and member_head[first] not in anchored:
+            region_id = member_head[first]
+        region = region_by_id.get(region_id) if region_id is not None else None
+        if region is None:
+            continue
+        paragraph.figure_head = {"page": region.page, "rect": region.rect,
+                                 "text": region.text, "caption": region.caption,
+                                 "source": region.source}
 
 
 # ============================================================
@@ -1467,7 +1585,7 @@ def classify_roles(blocks, page_heights: dict, total_pages: int, body_size: floa
                 b.role = ROLE_HEADING
             continue
 
-        if _CAPTION_RE.match(text):
+        if is_caption_text(text):
             b.role = ROLE_CAPTION
             continue
 
@@ -1577,6 +1695,16 @@ def _table_payload(paragraph) -> dict:
     }
 
 
+def _figure_region_payload(paragraph) -> dict:
+    """图区域段落 → 渲染载荷（同一套截图管线，载荷里带页码、矩形、区域文字与来源）"""
+    payload = dict(paragraph.figure_head or {})
+    payload.setdefault("page", paragraph.page)
+    payload.setdefault("rect", (paragraph.x0, paragraph.y0, paragraph.x1, paragraph.y1))
+    payload.setdefault("text", paragraph.text)
+    payload.setdefault("caption", getattr(paragraph, "figure_caption", ""))
+    return payload
+
+
 def _build_segments(buffer, runin_heads=None):
     """
     把缓冲里的段落转成卡片段落。
@@ -1586,11 +1714,17 @@ def _build_segments(buffer, runin_heads=None):
         ("text",    文本)   正文
         ("formula", {...})  公式——**渲染成图片**，因为二维公式没法用一行文字表达
         ("table",   {...})  表格——同样渲染成图片，因为线性化后列关系全丢
+        ("figure_region", {...}) 图区域——矢量图页上的插图（阶段 4.6，默认关）
 
     公式段落的范围直接取「公式区域」（formula_finder 聚类得到的整簇外接矩形）：
     一个区域只出一张图，区域内的其余块在 build_reading_cards 里已经跳过。
     不再需要「按垂直间距把相邻公式粘起来」那种补丁式逻辑——聚类已经把
     「同一处公式的上下游碎片」合并好了。表格段落同理，范围取整张表的外接矩形。
+    图区域段落也一样：范围取 figure_finder 定位出的矩形。
+
+    ⚠️ 图区域的截图段是**挂在题注段落上**的（paragraph.figure_head）：
+    题注在图的**下方**，所以先出区域图、再出题注文字，阅读顺序才对得上。
+    图内小字（figure_id ≥ 0 的段落）走 "figure_region" 这个 kind，只出图、不出文字。
 
     runin_heads（默认 None）：「行内小标题」补丁的开关。
     传入 GROBID 候选标题列表时，**正文段落**若以某条候选开头，就拆成
@@ -1601,6 +1735,11 @@ def _build_segments(buffer, runin_heads=None):
     """
     segments = []
     for kind, paragraph in buffer:
+        # 图区域截图段：挂在「头段落」上（通常是题注段落），先出图、再出它的文字
+        if getattr(paragraph, "figure_head", None):
+            segments.append(("figure_region", _figure_region_payload(paragraph)))
+        if kind == "figure_region":
+            continue                      # 图内小字：只由上一行的截图承载，不进文字流
         text = paragraph.text.strip()
         if not text:
             continue
@@ -1766,6 +1905,17 @@ def build_reading_cards(paragraphs, target_words: int = 400, dehyphenate: bool =
                 and table_head.get(paragraph.table_id) != paragraph.atom_indices[0]:
             continue
 
+        # 图区域（阶段 4.6）：图内小字**移出文字流**，由题注段落上的区域截图承载。
+        # 这一支必须排在标题分支之前：图内小字里有加粗的面板标签（"a  Word-level"），
+        # 字号 9.3pt 会被标题规则当成标题，先走标题分支的话它就成了卡片里的一行小标题。
+        if paragraph.figure_id >= 0:
+            if not paragraph.figure_head:
+                continue                  # 非头成员：整块由图承载，这里不再出现
+            if not buffer:
+                buffer_section = (paragraph.section_number, paragraph.section_title)
+            buffer.append(("figure_region", paragraph))
+            continue
+
         if paragraph.role == ROLE_HEADING and not paragraph.is_table:
             # 章节标题进卡片内部（保持原位、加粗显示），不再单独占一张卡
             if not buffer:
@@ -1825,7 +1975,8 @@ def build_reading_cards(paragraphs, target_words: int = 400, dehyphenate: bool =
 # ============================================================
 
 def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
-              target_words: int = 400, table_mode: str = "image", runin_heads=None) -> dict:
+              target_words: int = 400, table_mode: str = "image", runin_heads=None,
+              figure_region: bool = False) -> dict:
     """
     PDF 字节流 → 阅读数据。
 
@@ -1836,6 +1987,9 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
         groups           : list[list[int]] 段落分组（原子块下标），纯派生、可解释
         formula_clusters : list[FormulaCluster] 公式区域（含成员块下标，便于核对）
         table_regions  : list[TableRegion] 表格区域（题注 + 对齐列几何校验通过）
+        figure_regions   : list[FigureRegion] 图区域（阶段 4.6；关掉时恒为空列表）
+        figure_failures  : list[dict]   过了页级闸门但**定位失败**的图题注（诊断要如实显示）
+        figure_stats     : dict         图区域的诊断数字（题注页 / 无面板级位图页 / 过闸门页）
         roles            : dict         各角色的块数统计（正文/页眉页脚/作者单位/参考文献…）
         pages            : list[dict]   每页的排版检测结果（诊断用）
         body_size        : float        估算出的正文字号
@@ -1851,6 +2005,13 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
         None = 完全旧行为（回退开关）；传入列表时，卡片内部的正文段若以某条候选标题
         开头，会被拆成「加粗标题 + 正文」两段呈现。**只改卡片段落视图**：
         原子块、段落文本、卡片文本与词数一律不变（理由见 build_reading_cards）。
+
+    figure_region：矢量图页的**图区域截图**开关，**默认 False = 完全旧行为**（回退开关）。
+        打开后：① 逐页探测矢量路径项数与最大位图显示面积（figure_finder.probe_page）；
+        ② 页级闸门（矢量 ≥ 20 且没有面板级位图）通过的页，用「题注锚点 + 间隙聚类」
+           定位出图区域；③ 区域内的**图内小字**移出文字流（改由区域截图承载），
+           并且不再参与公式聚类；④ 题注照旧留在卡片流里（项目规则：图注视作正文）。
+        定位不出可信区域时**放弃截图**（不退化截整页），原因记进 figure_failures。
     """
     start = time.time()
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
@@ -1862,6 +2023,7 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
         pages_meta, blocks, total_chars = [], [], 0
         page_heights, page_sizes = {}, {}
         page_lines = {}                 # 行级数据（表格判定用，只在 image 模式下采集）
+        page_probes = {}                # 图区域探测（只在开关打开时采集，不白跑）
 
         for i, page in enumerate(doc):
             page_no = i + 1
@@ -1869,6 +2031,10 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
             total_chars += chars
             page_heights[page_no] = page.rect.height
             page_sizes[page_no] = (page.rect.width, page.rect.height)
+            if figure_region:
+                # 图区域探测只在这个开关打开时跑：get_bboxlog() 要遍历整页的绘图指令，
+                # 关掉时一次都不该跑（回退开关要求「关掉 = 与改动前逐字段一致」，也别白花时间）
+                page_probes[page_no] = figure_finder.probe_page(page)
 
             raw_blocks, raw_lines = extract_page(page, page_no, dehyphenate)
             gutter = detect_gutter(raw_blocks, page.rect.width)
@@ -1925,9 +2091,27 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
             table_excluded = frozenset(i for region in found_regions
                                        for i in region.atom_indices)
 
+        # ---- 四之二、图区域（阶段 4.6，默认关闭）----
+        # 顺序：表格之后（表格区域必须先被认定，图区域要**扣除**表格块）、
+        #      公式聚类之前（图内小字先被排除，公式聚类就不会把它们聚成公式图——
+        #      旧 NHB 第 2/3/4 页有 58 个 fragment/weak 块，不排除就会在图里冒出公式图）。
+        if figure_region:
+            figure_excluded = frozenset(i for region in found_regions
+                                        for i in region.atom_indices)
+            found_figures, figure_failures = figure_finder.find_figure_regions(
+                blocks, page_probes, page_sizes, body_size, excluded=figure_excluded)
+            apply_figure_regions(blocks, found_figures)
+            # 一个成员都没标上的区域是"图内文字本来就是矢量轮廓"那种，
+            # 它照样出图（atom_indices 为空），所以这里不做过滤
+            figure_regions = found_figures
+            figure_stats = figure_finder.figure_report(blocks, page_probes)
+        else:
+            figure_regions, figure_failures, figure_stats = [], [], {}
+            figure_excluded = frozenset()
+
         # ---- 五、公式：三级标记 → 区域聚类 → 确认的公式移出文字流 ----
-        # 表格块已经在 mark_formula_tiers 里被排除，不会与表格图打架。
-        mark_formula_tiers(blocks, margins, excluded=table_excluded)
+        # 表格块与图区域的块都已经在这里被排除，不会与表格图 / 图区域打架。
+        mark_formula_tiers(blocks, margins, excluded=table_excluded | figure_excluded)
         clusters = formula_finder.find_formula_clusters(blocks, page_sizes, margins)
         apply_clusters(blocks, clusters)
         # 一个成员都没标上的簇（判定出来的块全在背景信息里）不呈现，避免出现空区域
@@ -1945,6 +2129,7 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
             paragraph.text = repair_stats_symbols(paragraph.text)
         sync_paragraph_formulas(blocks, paragraphs, clusters)
         sync_paragraph_tables(blocks, paragraphs, table_regions)
+        sync_paragraph_figures(blocks, paragraphs, figure_regions)
 
         # ---- 七、卡片：正文按章节聚合，公式 / 表格区域整块出图 ----
         cards = build_reading_cards(paragraphs, target_words, dehyphenate, runin_heads)
@@ -1960,6 +2145,9 @@ def parse_pdf(pdf_bytes: bytes, merge_on: bool = True, dehyphenate: bool = True,
             "groups": groups,               # 段落分组（原子块下标），可解释、可回退
             "formula_clusters": clusters,   # 公式区域：诊断面板据此核对「合了哪几块」
             "table_regions": table_regions,  # 表格区域：诊断面板据此核对「框住了哪几行」
+            "figure_regions": figure_regions,    # 图区域（默认关闭，关掉时恒为空列表）
+            "figure_failures": figure_failures,  # 定位失败的图题注（诊断如实显示）
+            "figure_stats": figure_stats,        # 图区域诊断数字（题注页/无位图页/过闸门页）
             "roles": dict(Counter(b.role for b in blocks)),
             "pages": pages_meta,
             "body_size": body_size,

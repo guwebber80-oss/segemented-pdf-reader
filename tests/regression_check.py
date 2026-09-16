@@ -57,6 +57,7 @@ PROJECT_SUITES = [
     ("4.4-B 表格区域截图（19 条断言）", "test_table.py"),
     ("4.4-B 修复：公式碎片堆种子 + 表注（28 条断言）", "test_formula_seeds.py"),
     ("4.5 行内小标题补丁（45 条断言）", "test_runin_headings.py"),
+    ("4.6 矢量图页的图区域截图（68 条断言）", "test_figure_region.py"),
     ("标题/角色：DOI 不得当小标题（13 条断言）", "test_heading_roles.py"),
     ("阶段 5 架构守卫（12 条断言）", "test_architecture.py"),
     ("阶段 5 界面面板与放大弹层冒烟（14 条断言）", "test_ui_panels.py"),

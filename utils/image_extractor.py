@@ -65,11 +65,43 @@ def _apply_alpha(doc, xref: int, smask: int):
         except Exception:
             pass        # 掩码坏了不影响主图，继续用原图
 
-    colorspace = getattr(pix, "colorspace", None)
-    if colorspace is None or colorspace.n > 4:
-        pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+    return _to_renderable(pix)
 
-    return pix
+
+# 「能直接写 PNG」的通道数：1 = 灰度（DeviceGray / ICCBased 灰度），3 = RGB
+# （DeviceRGB / ICCBased RGB / Indexed 解到基色空间后都是 1 或 3 通道）。
+# ⚠️ 判据必须按**去掉 alpha 之后的通道数**算，不能直接看 pix.n：
+# smask 叠加后 RGB 图的 pix.n 就是 4（RGB + alpha），与「n==4 的 CMYK」撞在一起。
+_RENDERABLE_CHANNELS = (1, 3)
+
+
+def _to_renderable(pix):
+    """
+    把任意色彩空间的位图变成「能写 PNG」的形态：非 RGB / 灰度的一律转 RGB。
+
+    ⚠️ 这里修的是一个真 bug：原守卫写的是 `colorspace.n > 4`，
+    于是 CMYK 位图（n == 4）**根本进不了转换分支**，一路走到
+    `pix.tobytes("png")` 抛 `ValueError: unsupported colorspace for 'png'`
+    ——实测样本「补例\\s41562-026-02534-0.pdf」第 24 页 xref 10003 就是这么崩的。
+
+    判据按「去 alpha 后的基色空间通道数」：
+      · 1（灰度）或 3（RGB）→ **原样返回**（含 ICCBased 变体与带 alpha 的形态）；
+        为什么必须原样：ICCBased RGB 转 csRGB 会重算像素（实测同一张图 PNG 从
+        587410 字节变成 587042 字节），会把已有 156 张位图的缩略图字节全部改掉，
+        违背「改动不得外溢」这条铁律；
+      · 其余（CMYK 的 4 通道、以及将来任何别的色彩空间）→ 转 csRGB，
+        覆盖范围比「只把 4 改成 3」广，不用为每种色彩空间各加一条分支。
+    """
+    colorspace = getattr(pix, "colorspace", None)
+    if colorspace is not None and colorspace.n in _RENDERABLE_CHANNELS:
+        return pix
+
+    try:
+        return pymupdf.Pixmap(pymupdf.csRGB, pix)
+    except Exception:
+        # 转不了就退回原图：让调用方照旧按「解码失败」记账，
+        # 行为不比从前更差（以前这里连试都不试）。
+        return pix
 
 
 def _shrink_to_width(pixmap, target_width: int):

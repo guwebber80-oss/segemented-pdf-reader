@@ -28,6 +28,7 @@
       <label class="chk"><input type="checkbox" id="set-dehyphenate" checked> 行尾连字符合并</label>
       <label class="chk"><input type="checkbox" id="set-showall"> 显示全部内容（核对过滤用）</label>
       <label class="chk" title="用 GROBID 抓到的行内小标题（以句点结尾、与正文同段的那类）把卡片里的「标题 + 正文」拆开加粗显示。需要先在右栏运行一次 GROBID 校验；默认关闭，关掉与旧行为完全一致。"><input type="checkbox" id="set-runin"> 用小标题补丁（需先运行 GROBID 交叉校验）</label>
+      <label class="chk" title="有些期刊的插图是矢量绘制的（页面里没有位图），图内的小字（坐标轴刻度、子图角标、图例）会被当成正文混进卡片。打开后：矢量图页按「题注锚点 + 间隙聚类」定位出图区域，整块截图呈现，图内小字移出正文（题注仍留在卡片里）。默认关闭，关掉与旧行为完全一致。"><input type="checkbox" id="set-figure"> 图区域截图（矢量图页，图内小字移出正文）</label>
       <label class="rng">卡片目标词数 <b id="set-words-label">200</b>
         <input type="range" id="set-words" min="100" max="400" step="25" value="200"></label>
       <div class="seg mini" id="table-seg">

@@ -18,8 +18,10 @@ from utils import store
 
 # 视作「正文/标题」、需要翻译的段落类型
 TEXT_KINDS = ("heading", "text")
-# 以区域截图呈现的类型
-REGION_KINDS = ("formula", "table")
+# 以区域截图呈现的类型（figure_region 是阶段 4.6 的矢量图页插图，默认关闭）
+REGION_KINDS = ("formula", "table", "figure_region")
+# 区域类型 → 界面上的中文标注
+REGION_LABELS = {"formula": "公式区域", "table": "表格区域", "figure_region": "图区域"}
 
 # 人工修正用的存储键：**故意沿用 Streamlit 版那套 `in_xxx`**
 # —— 两个前端共用同一份 `.cache/`，键一样才意味着你在任一侧改的元数据，另一侧也看得见。
@@ -101,6 +103,10 @@ def settings_payload(settings: dict) -> dict:
     `runin_patch`（0/1）是阶段 4.5 新增的同级设置：是否启用「行内小标题补丁」。
     它只影响网页版卡片段落视图的呈现（默认关，关掉就是完全旧行为）；
     Streamlit 版不读这个键，所以两边仍然共用一份记录、互不干扰。
+
+    `figure_region`（0/1）是阶段 4.6 新增的同级设置：是否启用「矢量图页的图区域截图」。
+    默认关（0）——关掉时逐页探测都不跑，与基线逐字段一致；打开后图内小字移出正文、
+    改由区域截图承载。同样与 Streamlit 版共用一份记录，Streamlit 版不读这个键。
     """
     settings = settings or {}
     label = settings.get("table_mode_label")
@@ -118,6 +124,7 @@ def settings_payload(settings: dict) -> dict:
         "table_mode": "text" if label == "保留文字" else "image",
         "show_all": bool(settings.get("show_all", False)),
         "runin_patch": _flag(settings.get("runin_patch"), False),
+        "figure_region": _flag(settings.get("figure_region"), False),
     }
 
 
@@ -163,8 +170,8 @@ def card_payload(card, images_by_card, region_registry) -> dict:
         elif kind in REGION_KINDS:
             ident = region_id(payload.get("page", 0), payload.get("rect", (0, 0, 0, 0)))
             region_registry[ident] = {"type": "region", "kind": kind, "payload": payload}
-            meta = f"原文第 {payload.get('page', '?')} 页 · " + ("表格区域" if kind == "table"
-                                                              else "公式区域") + " · 原文截图"
+            meta = f"原文第 {payload.get('page', '?')} 页 · " \
+                   + REGION_LABELS.get(kind, "区域") + " · 原文截图"
             caption = (payload.get("caption") or "").strip()
             if caption:
                 meta += f"（{caption[:60]}）"
@@ -280,6 +287,7 @@ def overview_payload(result, cards, images, table_regions) -> dict:
         "images": len(images),
         "formula_regions": len(result.get("formula_clusters", [])),
         "table_regions": len(table_regions),
+        "figure_regions": len(result.get("figure_regions", [])),
         "elapsed": result.get("elapsed", 0.0),
         "body_size": result.get("body_size", 0.0),
         "total_chars": result.get("total_chars", 0),

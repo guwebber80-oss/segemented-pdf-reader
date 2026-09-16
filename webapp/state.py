@@ -47,17 +47,20 @@ class PaperState:
     # ---------------- 打开一篇文献 ----------------
     def open(self, pdf_bytes: bytes, file_name: str, merge_on=True, dehyphenate=True,
              target_words=200, table_mode="image", show_all=False,
-             runin_patch=False, runin_heads=None) -> dict:
+             runin_patch=False, runin_heads=None, figure_region=False) -> dict:
         """
         解析（或命中缓存）并返回给前端的 JSON（不含 registry）。
 
-        解析设置（合并/连字符/目标词数/表格呈现/显示全部/小标题补丁）由前端传进来，
+        解析设置（合并/连字符/目标词数/表格呈现/显示全部/小标题补丁/图区域）由前端传进来，
         并**按 Streamlit 版同名字段写进记录**——两个前端共用 `.cache/`，换前端时设置不会突然变。
 
         runin_patch：是否启用「行内小标题补丁」（默认关，等于旧行为）。
         runin_heads：显式指定候选标题；为 None 时按「开关开着 + 记录里有 grobid_heads」
             自动取用记录里的那批（它们是 run_grobid() 抓取并过滤后存下来的）。
             候选标题只用于拆卡片内部的段落视图，**不改**卡片切分与词数。
+
+        figure_region：是否启用「矢量图页的图区域截图」（阶段 4.6，默认关 = 旧行为）。
+            打开后图内小字移出文字流、改由区域截图承载；关掉时连逐页探测都不跑。
         """
         with self._lock:
             self.reset()
@@ -66,7 +69,7 @@ class PaperState:
             self.settings = payload_module.settings_payload({
                 "merge_on": merge_on, "dehyphenate_on": dehyphenate,
                 "target_words": target_words, "table_mode": table_mode, "show_all": show_all,
-                "runin_patch": runin_patch})
+                "runin_patch": runin_patch, "figure_region": figure_region})
             self.key, record = store.load_paper_for(pdf_bytes)
             self.cache_hit = record is not None
 
@@ -82,7 +85,8 @@ class PaperState:
             try:
                 self.parse_result = pdf_parser.parse_pdf(
                     pdf_bytes, merge_on, dehyphenate, target_words, table_mode,
-                    runin_heads=self.runin_heads or None)
+                    runin_heads=self.runin_heads or None,
+                    figure_region=bool(self.settings.get("figure_region")))
                 self.image_result = image_extractor.extract_images(pdf_bytes)
                 # ⚠️ 必须再做一次「图片 ↔ 卡片」关联：extract_images 只负责把图片抠出来，
                 # 是 associate_with_cards 给每张图写上 card_order，前端才能把插图放到对应卡片后面
@@ -365,10 +369,15 @@ class PaperState:
                      "members": getattr(c, "member_count", 0),
                      "preview": (c.text or "")[:70]}
                     for c in clusters],
+                # ⚠️ 表格区域是 utils.table_finder.TableRegion **dataclass**，不是 dict：
+                # 早先这里照抄了「行/列」那套中文键名（t.get("page")、t.get("行数")），
+                # 结果是 `/api/diagnostics` 一遇到表格区域就 AttributeError 500
+                # （实测「补例\s41562-026-02534-0.pdf」第 6 页有 1 个表格区域，必崩）。
+                # 口径与 Streamlit 版 ui/diagnostics.py 的「⑧ 表格区域明细」对齐，一律用属性读。
                 "table_regions": [
-                    {"id": payload_module.region_id(t.get("page", 0), t.get("rect", (0, 0, 0, 0))),
-                     "page": t.get("page"), "rows": t.get("行数"), "cols": t.get("列数"),
-                     "caption": (t.get("caption") or "")[:60]}
+                    {"id": payload_module.region_id(t.page, t.rect), "page": t.page,
+                     "rows": t.rows, "cols": t.columns,
+                     "caption": (t.caption or "")[:60]}
                     for t in tables],
                 "images": [{"id": f"fig_{i}", "page": img.page, "card": img.card_order,
                             "pixels": f"{img.pixel_w}×{img.pixel_h}",
@@ -376,6 +385,19 @@ class PaperState:
                            for i, img in enumerate(images)],
                 "skipped_images": [str(item)[:80]
                                    for item in self.image_result.get("skipped", [])][:10],
+                # 图区域（阶段 4.6，默认关闭）：开关关着时这几项都是空的，
+                # 但「本篇 N 个图注页无面板级位图」这个数字要等开关打开才有
+                #（逐页探测只在开关打开时跑，关掉时不白花时间、也不改任何行为）
+                "figure_regions": [
+                    {"id": payload_module.region_id(r.page, r.rect), "page": r.page,
+                     "members": len(r.atom_indices), "source": r.source,
+                     "caption": (r.caption or "")[:60]}
+                    for r in result.get("figure_regions", [])],
+                "figure_failures": [
+                    {"page": f.get("page"), "caption": (f.get("caption") or "")[:40],
+                     "reason": f.get("reason", "")}
+                    for f in result.get("figure_failures", [])],
+                "figure_stats": result.get("figure_stats", {}),
             }
     # ---------------- 缓存管理 ----------------
     def clear_cache(self, scope: str = "paper") -> dict:
