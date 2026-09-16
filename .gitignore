@@ -46,3 +46,6 @@ desktop.ini
 
 # 交互 demo（生成物，用 .dsh-scratch/build_demo_data.py 重建）
 交互demo.html
+
+# Windows 快捷方式是本机便利文件，不进仓库
+*.lnk

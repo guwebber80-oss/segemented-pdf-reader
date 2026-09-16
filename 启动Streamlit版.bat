@@ -1,10 +1,13 @@
 @echo off
 chcp 936 >nul
 setlocal enabledelayedexpansion
-title ¿ÆÑÐÎÄÏ× PDF ÖÇÄÜÔÄ¶ÁÆ÷£¨ÕýÊ½°æ£©
+title ¿ÆÑÐÎÄÏ× PDF ÖÇÄÜÔÄ¶ÁÆ÷£¨Streamlit °æ¡¤¶ÔÕÕ£©
 
 rem ============================================================================
-rem  Ò»¼üÆô¶¯£¨¡ï ÕýÊ½°æ = ÍøÒ³°æ£©£ºGROBID£¨¿ÉÑ¡£© + ±¾µØÍøÒ³·þÎñ + ×Ô¶¯¿ªä¯ÀÀÆ÷
+rem  Ò»¼üÆô¶¯£¨Streamlit °æ = ¾É½çÃæ£¬½ö×÷¶ÔÕÕ£©£ºGROBID£¨¿ÉÑ¡£© + Streamlit
+rem
+rem  ¡ï ÕýÊ½°æÊÇÍøÒ³°æ£ºÇëË«»÷¡¸Æô¶¯ÔÄ¶ÁÆ÷.bat¡¹£¨¶Ë¿Ú 8765£©¡£±¾ÎÄ¼þ±£ÁôÊÇÒòÎª
+rem    Á½Ì¨Ç°¶Ë¹²ÓÃÍ¬Ò»¸öÒýÇæ£¨utils/£©ÓëÍ¬Ò»·Ý .cache/£¬Ä³Ð©¹¦ÄÜ¿ÉÔÚÕâÀï¶ÔÕÕÑéÖ¤¡£
 rem
 rem  ÓÃ·¨£ºË«»÷±¾ÎÄ¼þ¼´¿É£»Ò²¿ÉÒÔÔÚÃüÁîÐÐ¼Ó --check Ö»×ö×Ô¼ì¡¢²»Æô¶¯·þÎñ¡£
 rem
@@ -17,14 +20,14 @@ rem  ·ñÔò cmd Öð×Ö½Ú½âÎöÖÐÎÄÊ±»á´íÂÒ£¨»á³öÏÖ "xxx is not recognized" Ö®Àà±¨´í£©¡
 rem
 rem  Î¬»¤Ô¼¶¨£ºÈô app.py ¸ÄÃû¡¢»ò .venv »»Î»ÖÃ£¬±¾½Å±¾ÒªÍ¬²½¸ÄÕâÈý´¦£º
 rem      set "PY=..."                    ½âÊÍÆ÷Â·¾¶
-rem      set "ENTRY=webapp\server.py"     Èë¿ÚÎÄ¼þÃû
+rem      set "ENTRY=app.py"             Èë¿ÚÎÄ¼þÃû
 rem      ÒÀÀµ×Ô¼ìÄÇÒ»ÐÐµÄ import ÁÐ±í
 rem ============================================================================
 
 set "PROJECT=%~dp0"
 set "PY=%PROJECT%.venv\Scripts\python.exe"
-set "ENTRY=webapp\server.py"
-set "APP_PORT=8765"
+set "ENTRY=app.py"
+set "APP_PORT=8501"
 set "GROBID_PORT=8070"
 set "GROBID_IMAGE=grobid/grobid:0.9.1-crf"
 
@@ -53,7 +56,7 @@ rem ËùÒÔ²¹Ò»¸öµã£¬cd /d "%~dp0." ²ÅÊÇ°²È«Ð´·¨¡£
 cd /d "%~dp0."
 
 echo [..]   ¼ì²éÒÀÀµÓëÄ£¿é...
-"%PY%" -c "import utils.pdf_parser, utils.table_finder, utils.metadata, utils.metadata_compare, utils.grobid_client, utils.image_extractor, utils.translator, utils.store, ui.persist, ui.theme, ui.layout, webapp.server, webapp.state, webapp.payload" 1>nul 2>nul
+"%PY%" -c "import utils.pdf_parser, utils.table_finder, utils.metadata, utils.metadata_compare, utils.grobid_client, utils.image_extractor, utils.translator, utils.store, ui.persist, ui.theme, ui.layout" 1>nul 2>nul
 if errorlevel 1 (
     echo [¾¯¸æ] ÒÀÀµ»òÄ£¿éµ¼ÈëÊ§°Ü£¬ÔÄ¶ÁÆ÷Æô¶¯²»ÁË¡£³£¼ûÔ­ÒòÓÐÁ½ÖÖ£º
     echo         Ò»£ºÐÂ°æ±¾ÐÂÔöÁËÒÀÀµ£¬Ö´ÐÐÏÂÃæÕâÌõÃüÁî¼´¿É£º
@@ -123,13 +126,11 @@ if /i "%~1"=="--check" (
 )
 
 echo.
-echo [Æô¶¯] ä¯ÀÀÆ÷»á×Ô¶¯´ò¿ª£º http://127.0.0.1:%APP_PORT%/
-echo        µÚÒ»´Î´ò¿ª£ºµã×óÀ¸¡¸Ñ¡Ôñ PDF ÎÄÏ×¡¹Ñ¡Ò»ÆªÂÛÎÄ¼´¿É¡£
-echo        ¿ì½Ý¼ü£º×óÓÒ·½Ïò¼ü·­Ò³ / L ÖÐÓ¢ÇÐ»» / I ³Á½þÄ£Ê½ / Esc ÍË³ö
+echo [Æô¶¯] ä¯ÀÀÆ÷»á×Ô¶¯´ò¿ª£º http://localhost:%APP_PORT%
 echo        ¼Ç×¡£º¹Ø±ÕÕâ¸ö´°¿Ú¾ÍÊÇÍ£Ö¹ÔÄ¶ÁÆ÷£¨»òÔÚ±¾´°¿Ú°´ Ctrl+C£©¡£
 echo        ÏëÍ£ GROBID£ºÁí¿ª´°¿ÚÖ´ÐÐ  docker stop grobid
 echo.
-"%PY%" -m webapp.server --port %APP_PORT%
+"%PY%" -m streamlit run "%PROJECT%%ENTRY%" --server.port %APP_PORT%
 
 :end
 echo.
